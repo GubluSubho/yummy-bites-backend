@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Yum Bites - Manager Login</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="center-screen">
+    <div class="card">
+      <h1>Yum Bites</h1>
+      <h2>Restaurant Manager Login</h2>
+
+      <div id="errorBox" class="error-box" style="display:none;"></div>
+
+      <label>Email</label>
+      <input type="email" id="email" placeholder="manager@test.com" autocomplete="username" />
+
+      <label>Password</label>
+      <input type="password" id="password" placeholder="Password" autocomplete="current-password" />
+
+      <button id="loginBtn">Log In</button>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "/api";
+  </script>
+  <script src="login.js"></script>
+</body>
+</html>

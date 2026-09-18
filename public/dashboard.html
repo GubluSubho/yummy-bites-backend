@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Yum Bites - Manager Dashboard</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="dashboard-wrap">
+    <div class="dashboard-header">
+      <h1 id="restaurantTitle">Manager's Menu</h1>
+      <button id="logoutBtn" class="logout-btn">Log Out</button>
+    </div>
+
+    <div id="statusBox" class="status-box"></div>
+
+    <div class="add-item-card">
+      <h2>Add New Item</h2>
+      <div class="add-item-form">
+        <input type="text" id="newItemName" placeholder="Item name (e.g. Lemon Tea)" />
+        <input type="text" id="newItemType" placeholder="Category (e.g. Hot Favourites)" />
+        <input type="number" id="newItemPrice" placeholder="Price (₹)" min="0" />
+        <input type="number" id="newItemQuantity" placeholder="Starting quantity" min="0" value="20" />
+        <button id="addItemBtn">Add Item</button>
+      </div>
+    </div>
+
+    <div id="itemsList"></div>
+  </div>
+
+  <script>
+    const API_URL = "/api";
+
+    const RESTAURANT_NAMES = {
+      "6a8bd9192caadbaa8c868324": "Nescafe",
+      "6a9f61b9f1aaa4b040d7f9ee": "Canteen",
+      "6a9f627a7468fb0ea3d9d0c9": "Xpress (Café Coffee Day)",
+      "6a9f62edc7d1a15dfd33dd92": "Panda Junction",
+      "6aab8d5e72c5cec5d4c376f4": "Jumbo",
+    };
+  </script>
+  <script src="dashboard.js"></script>
+</body>
+</html>
