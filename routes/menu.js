@@ -1,10 +1,32 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const MenuItem = require('../models/MenuItem');
-const { verifyToken } = require('../middleware/auth');
+const { verifyToken, requireRole } = require('../middleware/auth');
 
+async function findOwnItem(req, res) {
+  if (!mongoose.isValidObjectId(req.params.itemId)) {
+    res.status(400).json({ error: 'Invalid item' });
+    return null;
+  }
+  const item = await MenuItem.findById(req.params.itemId);
+  if (!item) {
+    res.status(404).json({ error: 'Item not found' });
+    return null;
+  }
+  if (String(item.restaurantId) !== String(req.user.restaurantId)) {
+    res.status(403).json({ error: 'Not your restaurant' });
+    return null;
+  }
+  return item;
+}
+
+// Public: full menu of a cart, including unavailable items (the app shows them struck off)
 router.get('/:restaurantId', async (req, res) => {
   try {
+    if (!mongoose.isValidObjectId(req.params.restaurantId)) {
+      return res.status(400).json({ error: 'Invalid restaurant' });
+    }
     const items = await MenuItem.find({ restaurantId: req.params.restaurantId });
     res.json(items);
   } catch (err) {
@@ -12,22 +34,55 @@ router.get('/:restaurantId', async (req, res) => {
   }
 });
 
-router.post('/add', verifyToken, async (req, res) => {
+// Manager: add an item to their own cart only
+router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
   try {
-    if (req.user.role !== 'manager') return res.status(403).json({ error: 'Managers only' });
-    const item = await MenuItem.create(req.body);
-    res.json(item);
+    const { name, type, price, quantity, prepTimeMins } = req.body;
+
+    const cleanName = String(name || '').trim();
+    if (!cleanName || cleanName.length > 60) {
+      return res.status(400).json({ error: 'Item name is required (max 60 characters)' });
+    }
+    const cleanPrice = Number(price);
+    if (!Number.isFinite(cleanPrice) || cleanPrice < 0 || cleanPrice > 5000) {
+      return res.status(400).json({ error: 'Enter a valid price' });
+    }
+    const cleanQty = quantity === undefined ? 0 : Number(quantity);
+    if (!Number.isInteger(cleanQty) || cleanQty < 0 || cleanQty > 1000) {
+      return res.status(400).json({ error: 'Stock must be a whole number from 0 to 1000' });
+    }
+    const cleanPrep = prepTimeMins === undefined ? 5 : Number(prepTimeMins);
+    if (!Number.isInteger(cleanPrep) || cleanPrep < 1 || cleanPrep > 60) {
+      return res.status(400).json({ error: 'Prep time must be 1 to 60 minutes' });
+    }
+
+    const item = await MenuItem.create({
+      restaurantId: req.user.restaurantId,
+      name: cleanName,
+      type: type ? String(type).trim() : undefined,
+      price: cleanPrice,
+      quantity: cleanQty,
+      prepTimeMins: cleanPrep,
+      isAvailable: cleanQty > 0,
+    });
+    res.status(201).json(item);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-router.patch('/:itemId/availability', verifyToken, async (req, res) => {
+// Manager: switch an item on or off
+router.patch('/:itemId/availability', verifyToken, requireRole('manager'), async (req, res) => {
   try {
-    const item = await MenuItem.findById(req.params.itemId);
-    if (!item) return res.status(404).json({ error: 'Item not found' });
-    if (String(item.restaurantId) !== String(req.user.restaurantId))
-      return res.status(403).json({ error: 'Not your restaurant' });
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    if (typeof req.body.isAvailable !== 'boolean') {
+      return res.status(400).json({ error: 'isAvailable must be true or false' });
+    }
+    if (req.body.isAvailable && item.quantity <= 0) {
+      return res.status(400).json({ error: 'Set the stock above 0 before turning this item on' });
+    }
 
     item.isAvailable = req.body.isAvailable;
     await item.save();
@@ -37,16 +92,55 @@ router.patch('/:itemId/availability', verifyToken, async (req, res) => {
   }
 });
 
-router.patch('/:itemId/quantity', verifyToken, async (req, res) => {
+// Manager: set stock. Zero turns the item off, restocking from zero turns it back on.
+router.patch('/:itemId/quantity', verifyToken, requireRole('manager'), async (req, res) => {
   try {
-    const item = await MenuItem.findById(req.params.itemId);
-    if (!item) return res.status(404).json({ error: 'Item not found' });
-    if (String(item.restaurantId) !== String(req.user.restaurantId))
-      return res.status(403).json({ error: 'Not your restaurant' });
+    const item = await findOwnItem(req, res);
+    if (!item) return;
 
-    item.quantity = req.body.quantity;
+    const qty = Number(req.body.quantity);
+    if (!Number.isInteger(qty) || qty < 0 || qty > 1000) {
+      return res.status(400).json({ error: 'Stock must be a whole number from 0 to 1000' });
+    }
+
+    if (qty === 0) item.isAvailable = false;
+    else if (item.quantity === 0) item.isAvailable = true;
+
+    item.quantity = qty;
     await item.save();
     res.json(item);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Manager: set how long one portion takes (feeds the wait-time model)
+router.patch('/:itemId/preptime', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    const mins = Number(req.body.prepTimeMins);
+    if (!Number.isInteger(mins) || mins < 1 || mins > 60) {
+      return res.status(400).json({ error: 'Prep time must be 1 to 60 minutes' });
+    }
+
+    item.prepTimeMins = mins;
+    await item.save();
+    res.json(item);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Manager: remove an item from their own cart
+router.delete('/:itemId', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    await item.deleteOne();
+    res.json({ message: 'Item removed' });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
