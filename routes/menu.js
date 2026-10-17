@@ -59,7 +59,7 @@ router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
     const item = await MenuItem.create({
       restaurantId: req.user.restaurantId,
       name: cleanName,
-      type: type ? String(type).trim() : undefined,
+      type: type ? String(type).trim().slice(0, 30) : undefined,
       price: cleanPrice,
       quantity: cleanQty,
       prepTimeMins: cleanPrep,
@@ -107,6 +107,25 @@ router.patch('/:itemId/quantity', verifyToken, requireRole('manager'), async (re
     else if (item.quantity === 0) item.isAvailable = true;
 
     item.quantity = qty;
+    await item.save();
+    res.json(item);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Manager: change the price
+router.patch('/:itemId/price', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    const price = Number(req.body.price);
+    if (!Number.isFinite(price) || price < 0 || price > 5000) {
+      return res.status(400).json({ error: 'Enter a valid price' });
+    }
+
+    item.price = price;
     await item.save();
     res.json(item);
   } catch (err) {

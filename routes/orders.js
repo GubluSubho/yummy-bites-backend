@@ -5,12 +5,13 @@ const Order = require('../models/Order');
 const MenuItem = require('../models/MenuItem');
 const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
+const WalletTransaction = require('../models/WalletTransaction');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { calculateWait } = require('../utils/waitTime');
 
 const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ACTIVE = ['placed', 'preparing'];
-const ALLOWED_PAYMENTS = ['upi', 'cash'];
+const ALLOWED_PAYMENTS = ['upi', 'wallet', 'cash'];
 const NEXT_STATUS = {
   placed: ['preparing', 'cancelled'],
   preparing: ['ready', 'cancelled'],
@@ -41,15 +42,59 @@ function present(order) {
   return { ...plain, remainingMins: remainingMins(plain) };
 }
 
+async function withNames(input) {
+  const list = Array.isArray(input) ? input : [input];
+  const ids = [...new Set(list.map((o) => String(o.restaurantId)))];
+  const rests = await Restaurant.find({ _id: { $in: ids } }).select('name').lean();
+  const names = new Map(rests.map((r) => [String(r._id), r.name]));
+  const out = list.map((o) => ({
+    ...present(o),
+    restaurantName: names.get(String(o.restaurantId)) || '',
+  }));
+  return Array.isArray(input) ? out : out[0];
+}
+
 async function restoreStock(items) {
   for (const it of items) {
     await MenuItem.updateOne({ _id: it.menuItemId }, { $inc: { quantity: it.quantity } });
   }
 }
 
+// Give wallet money back for a cancelled order. Safe to call twice: only the first call pays out.
+async function refundWallet(order) {
+  if (order.paymentMethod !== 'wallet') return;
+  const marked = await Order.findOneAndUpdate(
+    { _id: order._id, paymentStatus: 'paid' },
+    { paymentStatus: 'refunded' },
+    { new: true }
+  );
+  if (!marked) return;
+
+  const user = await User.findByIdAndUpdate(
+    order.userId,
+    { $inc: { walletBalance: order.total } },
+    { new: true }
+  );
+  if (!user) return;
+
+  try {
+    await WalletTransaction.create({
+      userId: user._id,
+      type: 'refund',
+      amount: order.total,
+      balanceAfter: user.walletBalance,
+      orderId: order.orderId,
+      note: 'Order cancelled by the cart',
+    });
+  } catch (e) {
+    console.log('Wallet log failed:', e.message);
+  }
+}
+
 // Place an order (customers only)
 router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
   const reserved = [];
+  let charge = null;
   try {
     const { restaurantId, items, instructions, paymentMethod } = req.body;
 
@@ -62,7 +107,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 
     const method = paymentMethod || 'cash';
     if (!ALLOWED_PAYMENTS.includes(method)) {
-      return res.status(400).json({ error: 'Choose UPI or cash' });
+      return res.status(400).json({ error: 'Choose UPI, wallet or cash' });
     }
 
     const note = String(instructions || '').trim();
@@ -98,6 +143,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 
       if (!item) {
         await restoreStock(reserved);
+        reserved.length = 0;
         const missing = await MenuItem.findById(menuItemId).select('name');
         const label = missing ? missing.name : 'An item';
         return res.status(400).json({ error: label + ' is unavailable or out of stock' });
@@ -118,6 +164,26 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       { $set: { isAvailable: false } }
     );
 
+    const total = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+
+    let balanceAfter = null;
+    if (method === 'wallet') {
+      const payer = await User.findOneAndUpdate(
+        { _id: user._id, walletBalance: { $gte: total } },
+        { $inc: { walletBalance: -total } },
+        { new: true }
+      );
+      if (!payer) {
+        await restoreStock(reserved);
+        reserved.length = 0;
+        return res.status(400).json({
+          error: 'Not enough wallet balance. Add money at a cart counter or pick another payment method.',
+        });
+      }
+      charge = { userId: user._id, amount: total };
+      balanceAfter = payer.walletBalance;
+    }
+
     const queued = await Order.find({ restaurantId, status: { $in: ACTIVE } }).select('items status');
     const estimatedWaitMins = calculateWait({
       queuedOrders: queued,
@@ -125,7 +191,6 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       newItems: orderItems,
     });
 
-    const total = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
     const orderId = await makeOrderId();
 
     const order = await Order.create({
@@ -138,12 +203,38 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       instructions: note,
       total,
       paymentMethod: method,
+      paymentStatus: method === 'wallet' ? 'paid' : 'pending',
       estimatedWaitMins,
     });
 
-    res.status(201).json(present(order));
+    reserved.length = 0;
+    charge = null;
+
+    if (method === 'wallet') {
+      try {
+        await WalletTransaction.create({
+          userId: user._id,
+          type: 'payment',
+          amount: total,
+          balanceAfter,
+          orderId: order.orderId,
+          note: 'Order at ' + restaurant.name,
+        });
+      } catch (e) {
+        console.log('Wallet log failed:', e.message);
+      }
+    }
+
+    res.status(201).json(await withNames(order));
   } catch (err) {
-    await restoreStock(reserved);
+    try {
+      await restoreStock(reserved);
+      if (charge) {
+        await User.updateOne({ _id: charge.userId }, { $inc: { walletBalance: charge.amount } });
+      }
+    } catch (e) {
+      console.log('Rollback failed:', e.message);
+    }
     res.status(500).json({ error: err.message });
   }
 });
@@ -152,7 +243,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 router.get('/mine', verifyToken, requireRole('customer'), async (req, res) => {
   try {
     const orders = await Order.find({ userId: req.user.id }).sort({ createdAt: -1 }).limit(50);
-    res.json(orders.map(present));
+    res.json(await withNames(orders));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -165,7 +256,7 @@ router.get('/restaurant', verifyToken, requireRole('manager'), async (req, res) 
       restaurantId: req.user.restaurantId,
       status: { $in: ['placed', 'preparing', 'ready'] },
     }).sort({ createdAt: 1 });
-    res.json(orders.map(present));
+    res.json(await withNames(orders));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -184,7 +275,7 @@ router.get('/:orderId', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Not your order' });
     }
 
-    res.json(present(order));
+    res.json(await withNames(order));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -213,9 +304,13 @@ router.patch('/:orderId/status', verifyToken, requireRole('manager'), async (req
       return res.status(409).json({ error: 'Order was just updated, refresh and try again' });
     }
 
-    if (status === 'cancelled') await restoreStock(order.items);
+    if (status === 'cancelled') {
+      await restoreStock(order.items);
+      await refundWallet(updated);
+    }
 
-    res.json(present(updated));
+    const fresh = await Order.findById(order._id);
+    res.json(await withNames(fresh));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
