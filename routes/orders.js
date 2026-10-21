@@ -8,10 +8,13 @@ const User = require('../models/User');
 const WalletTransaction = require('../models/WalletTransaction');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { calculateWait } = require('../utils/waitTime');
+const { refundUpi, settleOrCancel } = require('../utils/payments');
 
 const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ACTIVE = ['placed', 'preparing'];
 const ALLOWED_PAYMENTS = ['upi', 'wallet', 'cash'];
+// How long an unpaid online order may hold its stock before it is released
+const PAYMENT_WINDOW_MS = 10 * 60 * 1000;
 const NEXT_STATUS = {
   placed: ['preparing', 'cancelled'],
   preparing: ['ready', 'cancelled'],
@@ -58,6 +61,15 @@ async function restoreStock(items) {
   for (const it of items) {
     await MenuItem.updateOne({ _id: it.menuItemId }, { $inc: { quantity: it.quantity } });
   }
+}
+
+// Explain to the customer why an item could not be reserved
+async function soldOutMessage(menuItemId, restaurantId, wantedQty) {
+  const doc = await MenuItem.findOne({ _id: menuItemId, restaurantId }).select('name quantity isAvailable');
+  if (!doc) return 'An item is no longer on the menu';
+  if (!doc.isAvailable) return doc.name + ' is not being served right now';
+  if (doc.quantity <= 0) return doc.name + ' has just sold out';
+  return 'Only ' + doc.quantity + ' left of ' + doc.name + ' (you asked for ' + wantedQty + ')';
 }
 
 // Give wallet money back for a cancelled order. Safe to call twice: only the first call pays out.
@@ -107,7 +119,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 
     const method = paymentMethod || 'cash';
     if (!ALLOWED_PAYMENTS.includes(method)) {
-      return res.status(400).json({ error: 'Choose UPI, wallet or cash' });
+      return res.status(400).json({ error: 'Choose online payment, wallet or cash' });
     }
 
     const note = String(instructions || '').trim();
@@ -133,6 +145,26 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       return res.status(400).json({ error: 'Add a phone number to your profile before ordering' });
     }
 
+    // One unpaid online payment at a time, so abandoned payments cannot hold stock
+    if (method === 'upi') {
+      const earlier = await Order.find({
+        userId: user._id,
+        paymentMethod: 'upi',
+        paymentStatus: 'pending',
+        status: 'placed',
+      });
+      for (const old of earlier) {
+        try {
+          await settleOrCancel(old);
+        } catch (e) {
+          return res.status(409).json({
+            error: 'You have an online payment in progress. Finish or cancel it first, then try again.',
+          });
+        }
+      }
+    }
+
+    // Reserve stock. Each item is taken in one atomic step, so two customers can never get the same last unit.
     const orderItems = [];
     for (const [menuItemId, qty] of wanted) {
       const item = await MenuItem.findOneAndUpdate(
@@ -144,9 +176,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       if (!item) {
         await restoreStock(reserved);
         reserved.length = 0;
-        const missing = await MenuItem.findById(menuItemId).select('name');
-        const label = missing ? missing.name : 'An item';
-        return res.status(400).json({ error: label + ' is unavailable or out of stock' });
+        return res.status(400).json({ error: await soldOutMessage(menuItemId, restaurantId, qty) });
       }
 
       reserved.push({ menuItemId: item._id, quantity: qty });
@@ -158,11 +188,6 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         prepTimeMins: item.prepTimeMins || 5,
       });
     }
-
-    await MenuItem.updateMany(
-      { _id: { $in: [...wanted.keys()] }, quantity: { $lte: 0 } },
-      { $set: { isAvailable: false } }
-    );
 
     const total = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
 
@@ -204,6 +229,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       total,
       paymentMethod: method,
       paymentStatus: method === 'wallet' ? 'paid' : 'pending',
+      paymentDueAt: method === 'upi' ? new Date(Date.now() + PAYMENT_WINDOW_MS) : undefined,
       estimatedWaitMins,
     });
 
@@ -249,12 +275,13 @@ router.get('/mine', verifyToken, requireRole('customer'), async (req, res) => {
   }
 });
 
-// A manager's live queue (their own cart only)
+// A manager's live queue (their own cart only). Online orders appear once they are paid.
 router.get('/restaurant', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const orders = await Order.find({
       restaurantId: req.user.restaurantId,
       status: { $in: ['placed', 'preparing', 'ready'] },
+      $or: [{ paymentMethod: { $ne: 'upi' } }, { paymentStatus: 'paid' }],
     }).sort({ createdAt: 1 });
     res.json(await withNames(orders));
   } catch (err) {
@@ -291,6 +318,9 @@ router.patch('/:orderId/status', verifyToken, requireRole('manager'), async (req
     if (String(order.restaurantId) !== String(req.user.restaurantId)) {
       return res.status(403).json({ error: 'Not your restaurant' });
     }
+    if (order.paymentMethod === 'upi' && order.paymentStatus !== 'paid' && status !== 'cancelled') {
+      return res.status(400).json({ error: 'Payment has not been received for this order yet' });
+    }
     if (!NEXT_STATUS[order.status].includes(status)) {
       return res.status(400).json({ error: 'Cannot move an order from ' + order.status + ' to ' + status });
     }
@@ -307,6 +337,7 @@ router.patch('/:orderId/status', verifyToken, requireRole('manager'), async (req
     if (status === 'cancelled') {
       await restoreStock(order.items);
       await refundWallet(updated);
+      await refundUpi(updated);
     }
 
     const fresh = await Order.findById(order._id);
