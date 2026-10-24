@@ -92,6 +92,18 @@ async function maybeResetPasswords() {
   await meta.updateOne({ _id: 'manager-reset' }, { $set: { token, at: new Date() } }, { upsert: true });
 }
 
+// Which carts have a live food counter and which take parcel orders (set once, only where not set yet)
+async function applyCartRules() {
+  await Restaurant.updateMany(
+    { name: /nescaf/i, liveCounter: { $exists: false } },
+    { $set: { liveCounter: true, allowParcel: true } }
+  );
+  await Restaurant.updateMany(
+    { name: /panda/i, allowParcel: { $exists: false } },
+    { $set: { allowParcel: true } }
+  );
+}
+
 async function bootstrap() {
   const carts = await Restaurant.countDocuments();
   const managers = await User.countDocuments({ role: 'manager' });
@@ -99,6 +111,7 @@ async function bootstrap() {
   if (carts === 0 && managers === 0 && process.env.AUTO_SEED === 'true') {
     await firstSeed();
   }
+  await applyCartRules();
   await maybeResetPasswords();
 }
 

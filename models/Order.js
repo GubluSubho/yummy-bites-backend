@@ -16,14 +16,16 @@ const orderSchema = new mongoose.Schema({
   phone: { type: String, required: true },
   items: { type: [orderItemSchema], required: true },
   instructions: { type: String, default: '', maxlength: 200 },
+  isParcel: { type: Boolean, default: false },
+  parcelFee: { type: Number, default: 0, min: 0 },
   total: { type: Number, required: true },
-  paymentMethod: { type: String, enum: ['upi', 'wallet', 'cash'], default: 'cash' },
+  paymentMethod: { type: String, enum: ['upi', 'wallet', 'cash'], default: 'upi' },
   paymentStatus: { type: String, enum: ['pending', 'paid', 'failed', 'refunded'], default: 'pending' },
   paymentDueAt: { type: Date },
   razorpayOrderId: { type: String },
   razorpayPaymentId: { type: String },
   status: { type: String, enum: ['placed', 'preparing', 'ready', 'completed', 'cancelled'], default: 'placed' },
-  estimatedWaitMins: { type: Number, required: true }
+  estimatedWaitMins: { type: Number, required: true, min: 0 }
 }, { timestamps: true });
 
 orderSchema.index({ restaurantId: 1, status: 1 });

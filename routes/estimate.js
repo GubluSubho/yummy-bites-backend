@@ -1,18 +1,15 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
-const Order = require('../models/Order');
 const MenuItem = require('../models/MenuItem');
 const Restaurant = require('../models/Restaurant');
 const { verifyToken, requireRole } = require('../middleware/auth');
-const { calculateWait } = require('../utils/waitTime');
+const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
 
-const ACTIVE = ['placed', 'preparing'];
-
-// Preview the wait time and check stock without placing an order
+// Preview the bill and the wait, and check stock, without placing an order
 router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
   try {
-    const { restaurantId, items } = req.body;
+    const { restaurantId, items, parcel } = req.body;
 
     if (!mongoose.isValidObjectId(restaurantId)) {
       return res.status(400).json({ error: 'Invalid restaurant' });
@@ -48,7 +45,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         continue;
       }
       if (!d.isAvailable || d.quantity <= 0) {
-        problems.push(d.name + ' is out of stock');
+        problems.push(d.name + (d.quantity <= 0 ? ' has sold out' : ' is not being served right now'));
         continue;
       }
       if (d.quantity < qty) {
@@ -59,18 +56,28 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       subtotal += d.price * qty;
     }
 
+    const parcelFee = restaurant.allowParcel && parcel ? PARCEL_FEE : 0;
+    const base = {
+      liveCounter: !!restaurant.liveCounter,
+      allowParcel: !!restaurant.allowParcel,
+      parcelFee,
+      problems,
+    };
+
     if (orderItems.length === 0) {
-      return res.json({ estimatedWaitMins: 0, subtotal: 0, problems });
+      return res.json({ ...base, estimatedWaitMins: 0, showEstimate: false, subtotal: 0, total: 0 });
     }
 
-    const queued = await Order.find({ restaurantId, status: { $in: ACTIVE } }).select('items status');
-    const estimatedWaitMins = calculateWait({
-      queuedOrders: queued,
-      cooksOnDuty: restaurant.cooksOnDuty,
-      newItems: orderItems,
-    });
+    const queued = await activeQueue(restaurantId);
+    const est = estimateFor(restaurant, queued, orderItems);
 
-    res.json({ estimatedWaitMins, subtotal, problems });
+    res.json({
+      ...base,
+      estimatedWaitMins: est.mins,
+      showEstimate: est.show,
+      subtotal,
+      total: subtotal + parcelFee,
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

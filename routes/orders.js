@@ -7,12 +7,12 @@ const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
 const WalletTransaction = require('../models/WalletTransaction');
 const { verifyToken, requireRole } = require('../middleware/auth');
-const { calculateWait } = require('../utils/waitTime');
+const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
 const { refundUpi, settleOrCancel } = require('../utils/payments');
 
 const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const ACTIVE = ['placed', 'preparing'];
-const ALLOWED_PAYMENTS = ['upi', 'wallet', 'cash'];
+// Cash is not accepted any more: online payment or the wallet only
+const ALLOWED_PAYMENTS = ['upi', 'wallet'];
 // How long an unpaid online order may hold its stock before it is released
 const PAYMENT_WINDOW_MS = 10 * 60 * 1000;
 const NEXT_STATUS = {
@@ -48,12 +48,16 @@ function present(order) {
 async function withNames(input) {
   const list = Array.isArray(input) ? input : [input];
   const ids = [...new Set(list.map((o) => String(o.restaurantId)))];
-  const rests = await Restaurant.find({ _id: { $in: ids } }).select('name').lean();
-  const names = new Map(rests.map((r) => [String(r._id), r.name]));
-  const out = list.map((o) => ({
-    ...present(o),
-    restaurantName: names.get(String(o.restaurantId)) || '',
-  }));
+  const rests = await Restaurant.find({ _id: { $in: ids } }).select('name liveCounter').lean();
+  const info = new Map(rests.map((r) => [String(r._id), r]));
+  const out = list.map((o) => {
+    const r = info.get(String(o.restaurantId));
+    return {
+      ...present(o),
+      restaurantName: r ? r.name : '',
+      liveCounter: !!(r && r.liveCounter),
+    };
+  });
   return Array.isArray(input) ? out : out[0];
 }
 
@@ -108,7 +112,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
   const reserved = [];
   let charge = null;
   try {
-    const { restaurantId, items, instructions, paymentMethod } = req.body;
+    const { restaurantId, items, instructions, paymentMethod, parcel } = req.body;
 
     if (!mongoose.isValidObjectId(restaurantId)) {
       return res.status(400).json({ error: 'Invalid restaurant' });
@@ -117,15 +121,13 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       return res.status(400).json({ error: 'Add 1 to 30 items to the order' });
     }
 
-    const method = paymentMethod || 'cash';
-    if (!ALLOWED_PAYMENTS.includes(method)) {
-      return res.status(400).json({ error: 'Choose online payment, wallet or cash' });
+    if (paymentMethod === 'cash') {
+      return res.status(400).json({ error: 'Cash is not accepted. Pay online or use your wallet.' });
     }
-
-    const note = String(instructions || '').trim();
-    if (note.length > 200) {
-      return res.status(400).json({ error: 'Special instructions can be at most 200 characters' });
+    if (!ALLOWED_PAYMENTS.includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Choose online payment or wallet' });
     }
+    const method = paymentMethod;
 
     const wanted = new Map();
     for (const line of items) {
@@ -139,6 +141,21 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
+
+    // Special instructions only make sense at the live food counter
+    let note = '';
+    if (restaurant.liveCounter) {
+      note = String(instructions || '').trim();
+      if (note.length > 200) {
+        return res.status(400).json({ error: 'Special instructions can be at most 200 characters' });
+      }
+    }
+
+    if (parcel && !restaurant.allowParcel) {
+      return res.status(400).json({ error: 'Parcel is not available at this cart' });
+    }
+    const isParcel = !!(restaurant.allowParcel && parcel);
+    const parcelFee = isParcel ? PARCEL_FEE : 0;
 
     const user = await User.findById(req.user.id);
     if (!user || !user.phone) {
@@ -189,7 +206,8 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       });
     }
 
-    const total = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+    const itemsTotal = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+    const total = itemsTotal + parcelFee;
 
     let balanceAfter = null;
     if (method === 'wallet') {
@@ -202,19 +220,15 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         await restoreStock(reserved);
         reserved.length = 0;
         return res.status(400).json({
-          error: 'Not enough wallet balance. Add money at a cart counter or pick another payment method.',
+          error: 'Not enough wallet balance. Add money at a cart counter or pay online.',
         });
       }
       charge = { userId: user._id, amount: total };
       balanceAfter = payer.walletBalance;
     }
 
-    const queued = await Order.find({ restaurantId, status: { $in: ACTIVE } }).select('items status');
-    const estimatedWaitMins = calculateWait({
-      queuedOrders: queued,
-      cooksOnDuty: restaurant.cooksOnDuty,
-      newItems: orderItems,
-    });
+    const queued = await activeQueue(restaurantId);
+    const est = estimateFor(restaurant, queued, orderItems);
 
     const orderId = await makeOrderId();
 
@@ -226,11 +240,13 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       phone: user.phone,
       items: orderItems,
       instructions: note,
+      isParcel,
+      parcelFee,
       total,
       paymentMethod: method,
       paymentStatus: method === 'wallet' ? 'paid' : 'pending',
       paymentDueAt: method === 'upi' ? new Date(Date.now() + PAYMENT_WINDOW_MS) : undefined,
-      estimatedWaitMins,
+      estimatedWaitMins: est.mins,
     });
 
     reserved.length = 0;
@@ -321,7 +337,13 @@ router.patch('/:orderId/status', verifyToken, requireRole('manager'), async (req
     if (order.paymentMethod === 'upi' && order.paymentStatus !== 'paid' && status !== 'cancelled') {
       return res.status(400).json({ error: 'Payment has not been received for this order yet' });
     }
-    if (!NEXT_STATUS[order.status].includes(status)) {
+
+    // Carts without a live counter hand over ready-made food, so they can skip "preparing"
+    const cart = await Restaurant.findById(order.restaurantId).select('liveCounter');
+    const allowed = [...NEXT_STATUS[order.status]];
+    if (cart && !cart.liveCounter && order.status === 'placed') allowed.push('ready');
+
+    if (!allowed.includes(status)) {
       return res.status(400).json({ error: 'Cannot move an order from ' + order.status + ' to ' + status });
     }
 
