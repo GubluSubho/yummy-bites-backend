@@ -95,11 +95,11 @@ async function maybeResetPasswords() {
 // Which carts have a live food counter and which take parcel orders (set once, only where not set yet)
 async function applyCartRules() {
   await Restaurant.updateMany(
-    { name: /nescaf/i, liveCounter: { $exists: false } },
+    { name: /nescaf/i, liveCounter: { $ne: true } },
     { $set: { liveCounter: true, allowParcel: true } }
   );
   await Restaurant.updateMany(
-    { name: /panda/i, allowParcel: { $exists: false } },
+    { name: /panda/i, allowParcel: { $ne: true } },
     { $set: { allowParcel: true } }
   );
 }
@@ -116,3 +116,4 @@ async function bootstrap() {
 }
 
 module.exports = { bootstrap };
+
