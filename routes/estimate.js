@@ -52,7 +52,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         problems.push('Only ' + d.quantity + ' left of ' + d.name);
         continue;
       }
-      orderItems.push({ prepTimeMins: d.prepTimeMins || 5, quantity: qty });
+      orderItems.push({ prepTimeMins: d.showTime ? d.prepTimeMins || 5 : 0, quantity: qty });
       subtotal += d.price * qty;
     }
 
@@ -65,7 +65,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
     };
 
     if (orderItems.length === 0) {
-      return res.json({ ...base, estimatedWaitMins: 0, showEstimate: false, subtotal: 0, total: 0 });
+      return res.json({ ...base, estimatedWaitMins: 0, showEstimate: false, reason: null, subtotal: 0, total: 0 });
     }
 
     const queued = await activeQueue(restaurantId);
@@ -75,6 +75,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       ...base,
       estimatedWaitMins: est.mins,
       showEstimate: est.show,
+      reason: est.reason,
       subtotal,
       total: subtotal + parcelFee,
     });

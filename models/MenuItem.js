@@ -7,7 +7,8 @@ const menuItemSchema = new mongoose.Schema({
   price: { type: Number, required: true },
   isAvailable: { type: Boolean, default: true },
   quantity: { type: Number, default: 0, min: 0 },
-  prepTimeMins: { type: Number, default: 5, min: 1 }
+  prepTimeMins: { type: Number, default: 5, min: 1 },
+  showTime: { type: Boolean, default: false }
 });
 
 module.exports = mongoose.model('MenuItem', menuItemSchema);

@@ -202,7 +202,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         name: item.name,
         price: item.price,
         quantity: qty,
-        prepTimeMins: item.prepTimeMins || 5,
+        prepTimeMins: item.showTime ? item.prepTimeMins || 5 : 0,
       });
     }
 

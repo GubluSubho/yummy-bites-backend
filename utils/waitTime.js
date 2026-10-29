@@ -1,5 +1,5 @@
 const BATCH_FACTOR = 0.4;
-const MIN_WAIT = 3;
+const MIN_WAIT = 1;
 const MAX_WAIT = 90;
 
 function itemsWork(items) {

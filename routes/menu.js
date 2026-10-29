@@ -37,7 +37,7 @@ router.get('/:restaurantId', async (req, res) => {
 // Manager: add an item to their own cart only
 router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
   try {
-    const { name, type, price, quantity, prepTimeMins } = req.body;
+    const { name, type, price, quantity, prepTimeMins, showTime } = req.body;
 
     const cleanName = String(name || '').trim();
     if (!cleanName || cleanName.length > 60) {
@@ -63,6 +63,7 @@ router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
       price: cleanPrice,
       quantity: cleanQty,
       prepTimeMins: cleanPrep,
+      showTime: showTime === true,
       isAvailable: cleanQty > 0,
     });
     res.status(201).json(item);
@@ -133,18 +134,24 @@ router.patch('/:itemId/price', verifyToken, requireRole('manager'), async (req, 
   }
 });
 
-// Manager: set how long one portion takes (feeds the wait-time model)
-router.patch('/:itemId/preptime', verifyToken, requireRole('manager'), async (req, res) => {
+// Manager: choose whether this item shows an estimated time, and how many minutes it takes
+router.patch('/:itemId/timing', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const item = await findOwnItem(req, res);
     if (!item) return;
 
-    const mins = Number(req.body.prepTimeMins);
-    if (!Number.isInteger(mins) || mins < 1 || mins > 60) {
-      return res.status(400).json({ error: 'Prep time must be 1 to 60 minutes' });
+    if (typeof req.body.showTime !== 'boolean') {
+      return res.status(400).json({ error: 'showTime must be true or false' });
+    }
+    if (req.body.prepTimeMins !== undefined) {
+      const mins = Number(req.body.prepTimeMins);
+      if (!Number.isInteger(mins) || mins < 1 || mins > 60) {
+        return res.status(400).json({ error: 'Prep time must be 1 to 60 minutes' });
+      }
+      item.prepTimeMins = mins;
     }
 
-    item.prepTimeMins = mins;
+    item.showTime = req.body.showTime;
     await item.save();
     res.json(item);
   } catch (err) {
