@@ -9,6 +9,7 @@ const WalletTransaction = require('../models/WalletTransaction');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
 const { refundUpi, settleOrCancel } = require('../utils/payments');
+const { notifyOrder } = require('../utils/push');
 
 const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // Cash is not accepted any more: online payment or the wallet only
@@ -203,6 +204,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         price: item.price,
         quantity: qty,
         prepTimeMins: item.showTime ? item.prepTimeMins || 5 : 0,
+        imageVersion: item.hasImage ? item.imageRev || 0 : 0,
       });
     }
 
@@ -363,6 +365,9 @@ router.patch('/:orderId/status', verifyToken, requireRole('manager'), async (req
     }
 
     const fresh = await Order.findById(order._id);
+    if (status === 'ready' || status === 'cancelled') {
+      notifyOrder(fresh, status).catch(() => {});
+    }
     res.json(await withNames(fresh));
   } catch (err) {
     res.status(400).json({ error: err.message });

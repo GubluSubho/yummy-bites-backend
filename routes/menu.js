@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
 const MenuItem = require('../models/MenuItem');
+const ItemImage = require('../models/ItemImage');
 const { verifyToken, requireRole } = require('../middleware/auth');
 
 async function findOwnItem(req, res) {
@@ -29,6 +30,71 @@ router.get('/:restaurantId', async (req, res) => {
     }
     const items = await MenuItem.find({ restaurantId: req.params.restaurantId });
     res.json(items);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Public: the photo of one dish. The app adds ?v=<imageRev>, so it can be cached for a long time.
+router.get('/:itemId/image', async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.itemId)) return res.status(404).end();
+    const img = await ItemImage.findOne({ itemId: req.params.itemId });
+    if (!img) return res.status(404).end();
+    res.set('Content-Type', img.contentType || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(img.data);
+  } catch (err) {
+    res.status(404).end();
+  }
+});
+
+// Manager: set or replace the photo of a dish in their own cart
+router.put('/:itemId/image', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    let raw = String(req.body.image || '');
+    const marker = raw.indexOf('base64,');
+    if (marker !== -1) raw = raw.slice(marker + 7);
+    if (!raw || raw.length > 900000) {
+      return res.status(400).json({ error: 'The photo is too large. Pick a smaller one.' });
+    }
+
+    const buf = Buffer.from(raw, 'base64');
+    if (buf.length < 1000 || buf.length > 650000) {
+      return res.status(400).json({ error: 'The photo is too small or too large.' });
+    }
+    if (!(buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff)) {
+      return res.status(400).json({ error: 'Only JPEG photos are accepted.' });
+    }
+
+    await ItemImage.findOneAndUpdate(
+      { itemId: item._id },
+      { data: buf, contentType: 'image/jpeg' },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    item.hasImage = true;
+    item.imageRev = (item.imageRev || 0) + 1;
+    await item.save();
+    res.json(item);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Manager: remove the photo of a dish
+router.delete('/:itemId/image', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    await ItemImage.deleteOne({ itemId: item._id });
+    item.hasImage = false;
+    item.imageRev = (item.imageRev || 0) + 1;
+    await item.save();
+    res.json(item);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -165,6 +231,7 @@ router.delete('/:itemId', verifyToken, requireRole('manager'), async (req, res) 
     const item = await findOwnItem(req, res);
     if (!item) return;
 
+    await ItemImage.deleteOne({ itemId: item._id });
     await item.deleteOne();
     res.json({ message: 'Item removed' });
   } catch (err) {
