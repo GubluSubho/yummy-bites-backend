@@ -27,13 +27,14 @@ function readJpeg(body) {
 router.get('/mine', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const r = await Restaurant.findById(req.user.restaurantId).select(
-      'name cooksOnDuty liveCounter isOpen hasImage imageRev'
+      'name cooksOnDuty liveCounter isOpen hasImage imageRev allowSizes'
     );
     if (!r) return res.status(404).json({ error: 'Restaurant not found' });
     res.json({
       _id: r._id,
       name: r.name,
       cooksOnDuty: r.cooksOnDuty,
+      allowSizes: !!r.allowSizes,
       liveCounter: !!r.liveCounter,
       isOpen: r.isOpen !== false,
       hasImage: !!r.hasImage,

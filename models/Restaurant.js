@@ -8,6 +8,7 @@ const restaurantSchema = new mongoose.Schema({
   liveCounter: { type: Boolean, default: false },
   allowParcel: { type: Boolean, default: false },
   isOpen: { type: Boolean, default: true },
+  allowSizes: { type: Boolean, default: false },
   hasImage: { type: Boolean, default: false },
   imageRev: { type: Number, default: 0 }
 });
