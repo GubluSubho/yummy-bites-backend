@@ -225,6 +225,29 @@ router.patch('/:itemId/timing', verifyToken, requireRole('manager'), async (req,
   }
 });
 
+// Manager: change the name and category of a dish
+router.patch('/:itemId/details', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    const item = await findOwnItem(req, res);
+    if (!item) return;
+
+    const name = String(req.body.name === undefined ? item.name : req.body.name).trim();
+    if (!name || name.length > 60) {
+      return res.status(400).json({ error: 'Item name is required (max 60 characters)' });
+    }
+    if (req.body.type !== undefined) {
+      const type = String(req.body.type || '').trim().slice(0, 30);
+      item.type = type || undefined;
+    }
+
+    item.name = name;
+    await item.save();
+    res.json(item);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // Manager: remove an item from their own cart
 router.delete('/:itemId', verifyToken, requireRole('manager'), async (req, res) => {
   try {

@@ -49,6 +49,7 @@ async function getReceipts(ids) {
 }
 
 // Save the notification for the bell list, and tell the phone when it matters.
+// Phone notifications: ready, delivered and cancelled. "Being prepared" only goes to the bell list.
 // Never throws, so a failed notification cannot break an order.
 async function notifyOrder(order, status) {
   try {
@@ -71,8 +72,9 @@ async function notifyOrder(order, status) {
       push = true;
       popup = true;
     } else if (status === 'completed') {
-      title = 'Order collected';
-      body = 'Enjoy your meal! Thanks for ordering from ' + place + '.';
+      title = 'Order delivered';
+      body = 'Enjoy your meal! Order ' + order.orderId + ' from ' + place + ' was handed over.';
+      push = true;
       popup = true;
     } else if (status === 'cancelled') {
       title = 'Order cancelled';

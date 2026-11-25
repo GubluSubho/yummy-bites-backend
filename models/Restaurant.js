@@ -7,7 +7,9 @@ const restaurantSchema = new mongoose.Schema({
   cooksOnDuty: { type: Number, default: 2, min: 1 },
   liveCounter: { type: Boolean, default: false },
   allowParcel: { type: Boolean, default: false },
-  isOpen: { type: Boolean, default: true }
+  isOpen: { type: Boolean, default: true },
+  hasImage: { type: Boolean, default: false },
+  imageRev: { type: Number, default: 0 }
 });
 
 module.exports = mongoose.model('Restaurant', restaurantSchema);
