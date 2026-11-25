@@ -142,6 +142,9 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
+    if (restaurant.isOpen === false) {
+      return res.status(400).json({ error: restaurant.name + ' is closed right now. Please try again when it opens.' });
+    }
 
     // Special instructions only make sense at the live food counter
     let note = '';
@@ -365,7 +368,7 @@ router.patch('/:orderId/status', verifyToken, requireRole('manager'), async (req
     }
 
     const fresh = await Order.findById(order._id);
-    if (status === 'ready' || status === 'cancelled') {
+    if (['preparing', 'ready', 'completed', 'cancelled'].includes(status)) {
       notifyOrder(fresh, status).catch(() => {});
     }
     res.json(await withNames(fresh));

@@ -56,6 +56,9 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       subtotal += d.price * qty;
     }
 
+    if (restaurant.isOpen === false) {
+      problems.unshift('This cart is closed right now. Please try again when it opens.');
+    }
     const parcelFee = restaurant.allowParcel && parcel ? PARCEL_FEE : 0;
     const base = {
       liveCounter: !!restaurant.liveCounter,

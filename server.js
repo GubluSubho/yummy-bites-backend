@@ -31,6 +31,7 @@ app.use('/api/estimate', require('./routes/estimate'));
 app.use('/api/wallet', require('./routes/wallet'));
 app.use('/api/payment', require('./routes/payment'));
 app.use('/api/push', require('./routes/push'));
+app.use('/api/notifications', require('./routes/notifications'));
 
 process.on('unhandledRejection', (err) => console.log('Unhandled error:', err && err.message ? err.message : err));
 

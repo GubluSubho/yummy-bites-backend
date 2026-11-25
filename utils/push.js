@@ -1,5 +1,6 @@
 const PushToken = require('../models/PushToken');
 const Restaurant = require('../models/Restaurant');
+const AppNotification = require('../models/AppNotification');
 
 const SEND_URL = 'https://exp.host/--/api/v2/push/send';
 const RECEIPTS_URL = 'https://exp.host/--/api/v2/push/getReceipts';
@@ -47,29 +48,58 @@ async function getReceipts(ids) {
   return (body && body.data) || {};
 }
 
-// Tell the customer about their order. Never throws, so a failed notification cannot break an order.
+// Save the notification for the bell list, and tell the phone when it matters.
+// Never throws, so a failed notification cannot break an order.
 async function notifyOrder(order, status) {
   try {
     const rest = await Restaurant.findById(order.restaurantId).select('name');
     const place = rest ? rest.name : 'the counter';
+    const paid = ['paid', 'refunded'].includes(order.paymentStatus);
 
     let title = '';
     let body = '';
-    if (status === 'ready') {
+    let note = '';
+    let push = false;
+    let popup = false;
+
+    if (status === 'preparing') {
+      title = 'Your order is being prepared';
+      body = 'Order ' + order.orderId + ' is being prepared at ' + place + '.';
+    } else if (status === 'ready') {
       title = 'Your order is ready!';
       body = 'Order ' + order.orderId + ' is ready for pickup at ' + place + '.';
+      push = true;
+      popup = true;
+    } else if (status === 'completed') {
+      title = 'Order collected';
+      body = 'Enjoy your meal! Thanks for ordering from ' + place + '.';
+      popup = true;
     } else if (status === 'cancelled') {
       title = 'Order cancelled';
-      body = 'Order ' + order.orderId + ' at ' + place + ' was cancelled.';
-      const paid = ['paid', 'refunded'].includes(order.paymentStatus);
-      if (paid && order.paymentMethod === 'wallet') body += ' The money is back in your wallet.';
-      if (paid && order.paymentMethod === 'upi') body += ' Your payment will be refunded.';
+      if (paid && order.paymentMethod === 'wallet') note = 'The money is back in your wallet.';
+      if (paid && order.paymentMethod === 'upi') note = 'Your payment will be refunded.';
+      body = 'Order ' + order.orderId + ' at ' + place + ' was cancelled by the cart.' + (note ? ' ' + note : '');
+      push = true;
+      popup = true;
     } else {
       return;
     }
 
-    const result = await sendToUser(order.userId, { title, body, data: { orderId: order.orderId, type: status } });
-    console.log('Notification for ' + order.orderId + ' (' + status + '): ' + result.devices + ' phone(s) registered');
+    await AppNotification.create({
+      userId: order.userId,
+      type: status,
+      title,
+      body,
+      orderId: order.orderId,
+      place,
+      note,
+      popupShown: !popup,
+    });
+
+    if (push) {
+      const result = await sendToUser(order.userId, { title, body, data: { orderId: order.orderId, type: status } });
+      console.log('Notification for ' + order.orderId + ' (' + status + '): ' + result.devices + ' phone(s) registered');
+    }
   } catch (e) {
     console.log('Notification failed:', e.message);
   }

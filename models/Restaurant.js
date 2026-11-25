@@ -6,7 +6,8 @@ const restaurantSchema = new mongoose.Schema({
   staffIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   cooksOnDuty: { type: Number, default: 2, min: 1 },
   liveCounter: { type: Boolean, default: false },
-  allowParcel: { type: Boolean, default: false }
+  allowParcel: { type: Boolean, default: false },
+  isOpen: { type: Boolean, default: true }
 });
 
 module.exports = mongoose.model('Restaurant', restaurantSchema);

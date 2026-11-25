@@ -12,14 +12,33 @@ const COUNTED = { $or: [{ paymentMethod: { $ne: 'upi' } }, { paymentStatus: 'pai
 // Manager: own cart settings (must stay above the /:id route)
 router.get('/mine', verifyToken, requireRole('manager'), async (req, res) => {
   try {
-    const restaurant = await Restaurant.findById(req.user.restaurantId).select('name cooksOnDuty liveCounter');
+    const restaurant = await Restaurant.findById(req.user.restaurantId).select('name cooksOnDuty liveCounter isOpen');
     if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
     res.json({
       _id: restaurant._id,
       name: restaurant.name,
       cooksOnDuty: restaurant.cooksOnDuty,
       liveCounter: !!restaurant.liveCounter,
+      isOpen: restaurant.isOpen !== false,
     });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Manager: open or close the cart. A closed cart takes no new orders.
+router.patch('/mine/open', verifyToken, requireRole('manager'), async (req, res) => {
+  try {
+    if (typeof req.body.isOpen !== 'boolean') {
+      return res.status(400).json({ error: 'isOpen must be true or false' });
+    }
+    const restaurant = await Restaurant.findByIdAndUpdate(
+      req.user.restaurantId,
+      { isOpen: req.body.isOpen },
+      { new: true }
+    ).select('name isOpen');
+    if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
+    res.json({ name: restaurant.name, isOpen: restaurant.isOpen !== false });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -47,7 +66,7 @@ router.patch('/mine/cooks', verifyToken, requireRole('manager'), async (req, res
 // List all carts with item counts and the rules that apply to each
 router.get('/', async (req, res) => {
   try {
-    const restaurants = await Restaurant.find().select('name location liveCounter allowParcel').lean();
+    const restaurants = await Restaurant.find().select('name location liveCounter allowParcel isOpen').lean();
 
     const counts = await MenuItem.aggregate([
       {
@@ -79,6 +98,7 @@ router.get('/', async (req, res) => {
           ...r,
           liveCounter: !!r.liveCounter,
           allowParcel: !!r.allowParcel,
+          isOpen: r.isOpen !== false,
           parcelFee: PARCEL_FEE,
           totalItems: countMap[String(r._id)]?.totalItems || 0,
           availableItems: countMap[String(r._id)]?.availableItems || 0,
@@ -98,7 +118,7 @@ router.get('/:id', async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ error: 'Invalid restaurant' });
     }
-    const r = await Restaurant.findById(req.params.id).select('name location liveCounter allowParcel').lean();
+    const r = await Restaurant.findById(req.params.id).select('name location liveCounter allowParcel isOpen').lean();
     if (!r) return res.status(404).json({ error: 'Restaurant not found' });
 
     const activeOrders = await Order.countDocuments({
@@ -110,6 +130,7 @@ router.get('/:id', async (req, res) => {
       ...r,
       liveCounter: !!r.liveCounter,
       allowParcel: !!r.allowParcel,
+      isOpen: r.isOpen !== false,
       parcelFee: PARCEL_FEE,
       activeOrders,
       busy: activeOrders >= BUSY_QUEUE,
