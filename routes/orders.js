@@ -10,10 +10,12 @@ const { verifyToken, requireRole } = require('../middleware/auth');
 const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
 const { refundUpi, settleOrCancel } = require('../utils/payments');
 const { notifyOrder } = require('../utils/push');
+const { getConfig, quoteLine } = require('../utils/printPricing');
 
 const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-// Cash is not accepted any more: online payment or the wallet only
+// Cash is not accepted: online payment or the wallet only
 const ALLOWED_PAYMENTS = ['upi', 'wallet'];
+const SERVICES = ['print', 'binding', 'lamination'];
 // How long an unpaid online order may hold its stock before it is released
 const PAYMENT_WINDOW_MS = 10 * 60 * 1000;
 const NEXT_STATUS = {
@@ -43,7 +45,12 @@ function remainingMins(order) {
 
 function present(order) {
   const plain = order.toObject ? order.toObject() : order;
-  return { ...plain, remainingMins: remainingMins(plain) };
+  const items = (plain.items || []).map((it) => ({
+    ...it,
+    baseName: it.name,
+    name: it.size ? it.name + ' (' + it.size + ')' : it.detail ? it.name + ' | ' + it.detail : it.name,
+  }));
+  return { ...plain, items, remainingMins: remainingMins(plain) };
 }
 
 async function withNames(input) {
@@ -62,8 +69,10 @@ async function withNames(input) {
   return Array.isArray(input) ? out : out[0];
 }
 
+// Only menu dishes have stock. Print, binding and lamination lines are skipped.
 async function restoreStock(items) {
   for (const it of items) {
+    if (!it.menuItemId) continue;
     await MenuItem.updateOne({ _id: it.menuItemId }, { $inc: { quantity: it.quantity } });
   }
 }
@@ -130,15 +139,26 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
     }
     const method = paymentMethod;
 
+    // Dishes (by size) and print / binding / lamination lines
     const wanted = new Map();
+    const lines = new Map();
+    const services = [];
     for (const line of items) {
-      const qty = Number(line.quantity);
-      if (!mongoose.isValidObjectId(line.menuItemId) || !Number.isInteger(qty) || qty < 1 || qty > 20) {
+      if (line && line.service) {
+        if (!SERVICES.includes(line.service)) return res.status(400).json({ error: 'Invalid item' });
+        services.push({ service: line.service, job: line.job || {} });
+        continue;
+      }
+      const qty = Number(line && line.quantity);
+      if (!line || !mongoose.isValidObjectId(line.menuItemId) || !Number.isInteger(qty) || qty < 1 || qty > 20) {
         return res.status(400).json({ error: 'Invalid item or quantity' });
       }
       const key = String(line.menuItemId);
+      const size = String(line.size || '').trim().slice(0, 30);
+      lines.set(key + '|' + size, (lines.get(key + '|' + size) || 0) + qty);
       wanted.set(key, (wanted.get(key) || 0) + qty);
     }
+    if (services.length > 10) return res.status(400).json({ error: 'Too many print jobs in one order' });
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
@@ -166,6 +186,21 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       return res.status(400).json({ error: 'Add a phone number to your profile before ordering' });
     }
 
+    // Price the print jobs first, so nothing is reserved if one of them is wrong
+    const serviceItems = [];
+    if (services.length > 0) {
+      if (!restaurant.allowPrint) return res.status(400).json({ error: 'Printing is not available at this cart' });
+      const config = await getConfig(restaurantId);
+      for (const s of services) {
+        const q = await quoteLine({ userId: user._id, config, service: s.service, job: s.job });
+        if (q.error) return res.status(400).json({ error: q.error });
+        serviceItems.push({
+          service: s.service, name: q.title, detail: q.detail, job: q.job,
+          price: q.price, quantity: 1, prepTimeMins: 0,
+        });
+      }
+    }
+
     // One unpaid online payment at a time, so abandoned payments cannot hold stock
     if (method === 'upi') {
       const earlier = await Order.find({
@@ -185,11 +220,11 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       }
     }
 
-    // Reserve stock. Each item is taken in one atomic step, so two customers can never get the same last unit.
-    const orderItems = [];
+    // Reserve stock. Each dish is taken in one atomic step, so two customers can never get the same last unit.
+    const docs = new Map();
     for (const [menuItemId, qty] of wanted) {
       const item = await MenuItem.findOneAndUpdate(
-        { _id: menuItemId, restaurantId, isAvailable: true, quantity: { $gte: qty } },
+        { _id: menuItemId, restaurantId, isAvailable: true, price: { $gt: 0 }, quantity: { $gte: qty } },
         { $inc: { quantity: -qty } },
         { new: true }
       );
@@ -199,19 +234,44 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
         reserved.length = 0;
         return res.status(400).json({ error: await soldOutMessage(menuItemId, restaurantId, qty) });
       }
-
       reserved.push({ menuItemId: item._id, quantity: qty });
+      docs.set(menuItemId, item);
+    }
+
+    // One order line per dish and size, priced from the size chosen
+    const orderItems = [];
+    for (const [key, qty] of lines) {
+      const cut = key.indexOf('|');
+      const item = docs.get(key.slice(0, cut));
+      const size = key.slice(cut + 1);
+      const sizes = item.sizes || [];
+      let price = item.price;
+      if (sizes.length > 0) {
+        const chosen = sizes.find((s) => s.name === size);
+        if (!chosen) {
+          await restoreStock(reserved);
+          reserved.length = 0;
+          return res.status(400).json({ error: 'Choose a size for ' + item.name });
+        }
+        price = chosen.price;
+      } else if (size) {
+        await restoreStock(reserved);
+        reserved.length = 0;
+        return res.status(400).json({ error: item.name + ' does not come in sizes' });
+      }
       orderItems.push({
         menuItemId: item._id,
         name: item.name,
-        price: item.price,
+        size: size || undefined,
+        price,
         quantity: qty,
         prepTimeMins: item.showTime ? item.prepTimeMins || 5 : 0,
         imageVersion: item.hasImage ? item.imageRev || 0 : 0,
       });
     }
+    const allItems = [...orderItems, ...serviceItems];
 
-    const itemsTotal = orderItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+    const itemsTotal = allItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
     const total = itemsTotal + parcelFee;
 
     let balanceAfter = null;
@@ -233,8 +293,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
     }
 
     const queued = await activeQueue(restaurantId);
-    const est = estimateFor(restaurant, queued, orderItems);
-
+    const est = estimateFor(restaurant, queued, allItems);
     const orderId = await makeOrderId();
 
     const order = await Order.create({
@@ -243,7 +302,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       restaurantId,
       customerName: user.name,
       phone: user.phone,
-      items: orderItems,
+      items: allItems,
       instructions: note,
       isParcel,
       parcelFee,

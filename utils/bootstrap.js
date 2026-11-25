@@ -92,15 +92,24 @@ async function maybeResetPasswords() {
   await meta.updateOne({ _id: 'manager-reset' }, { $set: { token, at: new Date() } }, { upsert: true });
 }
 
-// Which carts have a live food counter and which take parcel orders (set once, only where not set yet)
+// Which carts have a live food counter, take parcels or run the print shop
 async function applyCartRules() {
   await Restaurant.updateMany(
     { name: /nescaf/i, liveCounter: { $ne: true } },
     { $set: { liveCounter: true, allowParcel: true } }
   );
-  await Restaurant.updateMany(
-    { name: /panda/i, allowParcel: { $ne: true } },
-    { $set: { allowParcel: true } }
+  await Restaurant.updateMany({ name: /nescaf/i, allowParcel: { $ne: true } }, { $set: { allowParcel: true } });
+  await Restaurant.updateMany({ name: /panda/i, allowParcel: { $ne: true } }, { $set: { allowParcel: true } });
+  await Restaurant.updateMany({ name: /jumbo/i, allowPrint: { $ne: true } }, { $set: { allowPrint: true } });
+}
+
+// Nescafe items start with their prep time switched on. Managers can change it per item later.
+async function applyItemTiming() {
+  const nescafe = await Restaurant.findOne({ name: /nescaf/i }).select('_id');
+  if (!nescafe) return;
+  await MenuItem.updateMany(
+    { restaurantId: nescafe._id, showTime: { $exists: false } },
+    { $set: { showTime: true } }
   );
 }
 
@@ -112,8 +121,9 @@ async function bootstrap() {
     await firstSeed();
   }
   await applyCartRules();
+  await applyItemTiming();
+  await require('./catalog').applyCatalog();
   await maybeResetPasswords();
 }
 
 module.exports = { bootstrap };
-

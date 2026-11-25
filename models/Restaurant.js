@@ -9,6 +9,7 @@ const restaurantSchema = new mongoose.Schema({
   allowParcel: { type: Boolean, default: false },
   isOpen: { type: Boolean, default: true },
   allowSizes: { type: Boolean, default: false },
+  allowPrint: { type: Boolean, default: false },
   hasImage: { type: Boolean, default: false },
   imageRev: { type: Number, default: 0 }
 });

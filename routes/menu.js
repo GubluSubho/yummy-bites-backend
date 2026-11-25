@@ -43,6 +43,14 @@ async function findOwnItem(req, res) {
   return item;
 }
 
+// A dish that had no price goes on sale (with stock) the moment it gets one
+function publishIfNew(item, wasUnpriced) {
+  if (wasUnpriced && item.price > 0) {
+    if (item.quantity <= 0) item.quantity = 30;
+    item.isAvailable = true;
+  }
+}
+
 // Manager: every dish of their own cart, including ones that still need a price
 router.get('/mine/list', verifyToken, requireRole('manager'), async (req, res) => {
   try {
@@ -52,7 +60,7 @@ router.get('/mine/list', verifyToken, requireRole('manager'), async (req, res) =
   }
 });
 
-// Public: full menu of a cart, including unavailable items (the app shows them struck off)
+// Public: the menu of a cart (dishes without a price are hidden)
 router.get('/:restaurantId', async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.restaurantId)) {
@@ -139,7 +147,17 @@ router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
     if (!cleanName || cleanName.length > 60) {
       return res.status(400).json({ error: 'Item name is required (max 60 characters)' });
     }
-    const cleanPrice = Number(price);
+
+    let sizeList = [];
+    if (Array.isArray(sizes) && sizes.length > 0) {
+      const cart = await Restaurant.findById(req.user.restaurantId).select('allowSizes');
+      if (!cart || !cart.allowSizes) return res.status(400).json({ error: 'Sizes are not available for this cart' });
+      const parsed = cleanSizes(sizes);
+      if (parsed.error) return res.status(400).json({ error: parsed.error });
+      sizeList = parsed.sizes;
+    }
+
+    const cleanPrice = sizeList.length > 0 ? Math.min(...sizeList.map((s) => s.price)) : Number(price);
     if (!Number.isFinite(cleanPrice) || cleanPrice < 0 || cleanPrice > 5000) {
       return res.status(400).json({ error: 'Enter a valid price' });
     }
@@ -152,22 +170,13 @@ router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
       return res.status(400).json({ error: 'Prep time must be 1 to 60 minutes' });
     }
 
-    let sizeList = [];
-    if (Array.isArray(sizes) && sizes.length > 0) {
-      const cart = await Restaurant.findById(req.user.restaurantId).select('allowSizes');
-      if (!cart || !cart.allowSizes) return res.status(400).json({ error: 'Sizes are not available for this cart' });
-      const parsed = cleanSizes(sizes);
-      if (parsed.error) return res.status(400).json({ error: parsed.error });
-      sizeList = parsed.sizes;
-    }
-
     const item = await MenuItem.create({
       restaurantId: req.user.restaurantId,
       name: cleanName,
       type: type ? String(type).trim().slice(0, 30) : undefined,
-      price: sizeList.length > 0 ? Math.min(...sizeList.map((s) => s.price)) : cleanPrice,
-      sizes: sizeList,
       subType: subType ? String(subType).trim().slice(0, 30) : undefined,
+      price: cleanPrice,
+      sizes: sizeList,
       quantity: cleanQty,
       prepTimeMins: cleanPrep,
       showTime: showTime === true,
@@ -236,7 +245,9 @@ router.patch('/:itemId/price', verifyToken, requireRole('manager'), async (req, 
       return res.status(400).json({ error: 'Enter a valid price' });
     }
 
+    const wasUnpriced = !(item.price > 0);
     item.price = price;
+    publishIfNew(item, wasUnpriced);
     await item.save();
     res.json(item);
   } catch (err) {
@@ -280,8 +291,10 @@ router.patch('/:itemId/sizes', verifyToken, requireRole('manager'), async (req, 
     const parsed = cleanSizes(req.body.sizes);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
+    const wasUnpriced = !(item.price > 0);
     item.sizes = parsed.sizes;
     if (parsed.sizes.length > 0) item.price = Math.min(...parsed.sizes.map((s) => s.price));
+    publishIfNew(item, wasUnpriced);
     await item.save();
     res.json(item);
   } catch (err) {
@@ -289,7 +302,7 @@ router.patch('/:itemId/sizes', verifyToken, requireRole('manager'), async (req, 
   }
 });
 
-// Manager: change the name and category of a dish
+// Manager: change the name, category and sub-category of a dish
 router.patch('/:itemId/details', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const item = await findOwnItem(req, res);
@@ -300,12 +313,13 @@ router.patch('/:itemId/details', verifyToken, requireRole('manager'), async (req
       return res.status(400).json({ error: 'Item name is required (max 60 characters)' });
     }
     if (req.body.type !== undefined) {
-      const type = String(req.body.type || '').trim().slice(0, 30);
-      item.type = type || undefined;
+      item.type = String(req.body.type || '').trim().slice(0, 30) || undefined;
+    }
+    if (req.body.subType !== undefined) {
+      item.subType = String(req.body.subType || '').trim().slice(0, 30) || undefined;
     }
 
     item.name = name;
-    if (req.body.subType !== undefined) item.subType = String(req.body.subType || '').trim().slice(0, 30) || undefined;
     await item.save();
     res.json(item);
   } catch (err) {

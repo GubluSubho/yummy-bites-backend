@@ -1,9 +1,12 @@
 const mongoose = require('mongoose');
 
 const orderItemSchema = new mongoose.Schema({
-  menuItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem', required: true },
+  menuItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'MenuItem' },
+  service: { type: String, enum: ['print', 'binding', 'lamination'] },
   name: { type: String, required: true },
   size: { type: String },
+  detail: { type: String },
+  job: { type: mongoose.Schema.Types.Mixed },
   price: { type: Number, required: true },
   quantity: { type: Number, required: true, min: 1 },
   prepTimeMins: { type: Number, required: true, min: 0 },

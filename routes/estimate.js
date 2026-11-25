@@ -5,6 +5,9 @@ const MenuItem = require('../models/MenuItem');
 const Restaurant = require('../models/Restaurant');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
+const { getConfig, quoteLine } = require('../utils/printPricing');
+
+const SERVICES = ['print', 'binding', 'lamination'];
 
 // Preview the bill and the wait, and check stock, without placing an order
 router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
@@ -18,9 +21,15 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
 
     const lines = new Map();
     const wanted = new Map();
+    const services = [];
     for (const line of items) {
-      const qty = Number(line.quantity);
-      if (!mongoose.isValidObjectId(line.menuItemId) || !Number.isInteger(qty) || qty < 1 || qty > 20) {
+      if (line && line.service) {
+        if (!SERVICES.includes(line.service)) return res.status(400).json({ error: 'Invalid item' });
+        services.push({ service: line.service, job: line.job || {} });
+        continue;
+      }
+      const qty = Number(line && line.quantity);
+      if (!line || !mongoose.isValidObjectId(line.menuItemId) || !Number.isInteger(qty) || qty < 1 || qty > 20) {
         return res.status(400).json({ error: 'Invalid item or quantity' });
       }
       const id = String(line.menuItemId);
@@ -70,21 +79,30 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       subtotal += price * qty;
     }
 
+    if (services.length > 0) {
+      if (!restaurant.allowPrint) {
+        problems.push('Printing is not available at this cart');
+      } else {
+        const config = await getConfig(restaurantId);
+        for (const s of services) {
+          const q = await quoteLine({ userId: req.user.id, config, service: s.service, job: s.job });
+          if (q.error) problems.push(q.error);
+          else subtotal += q.price;
+        }
+      }
+    }
+
     if (restaurant.isOpen === false) {
       problems.unshift('This cart is closed right now. Please try again when it opens.');
     }
     const parcelFee = restaurant.allowParcel && parcel ? PARCEL_FEE : 0;
     const base = { liveCounter: !!restaurant.liveCounter, allowParcel: !!restaurant.allowParcel, parcelFee, problems };
 
-    if (orderItems.length === 0) {
-      return res.json({ ...base, estimatedWaitMins: 0, showEstimate: false, reason: null, subtotal: 0, total: 0 });
-    }
-
     const queued = await activeQueue(restaurantId);
     const est = estimateFor(restaurant, queued, orderItems);
     res.json({
       ...base,
-      estimatedWaitMins: est.mins,
+      estimatedWaitMins: orderItems.length === 0 && !est.show ? 0 : est.mins,
       showEstimate: est.show,
       reason: est.reason,
       subtotal,

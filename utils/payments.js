@@ -33,8 +33,10 @@ function validSignature(razorpayOrderId, paymentId, signature) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// Only menu dishes have stock. Print, binding and lamination lines are skipped.
 async function restoreStock(items) {
   for (const it of items) {
+    if (!it.menuItemId) continue;
     await MenuItem.updateOne({ _id: it.menuItemId }, { $inc: { quantity: it.quantity } });
   }
 }

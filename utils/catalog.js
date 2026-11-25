@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 const Restaurant = require('../models/Restaurant');
 const MenuItem = require('../models/MenuItem');
 
-const TEAS = [
+const NESCAFE_TEAS = [
   { name: 'Black Tea', alt: [], regular: 25, large: 50 },
   { name: 'Cardamom Tea', alt: ['Caradomom Tea', 'Elaichi Tea'], regular: 30, large: 50 },
   { name: 'Green Tea', alt: [], regular: 25, large: 50 },
@@ -10,84 +10,96 @@ const TEAS = [
   { name: 'Masala Tea', alt: [], regular: 30, large: 50 },
 ];
 
-// Type the price after each colon. A dish left at 0 is added hidden until the manager sets a price.
+// Leave a price at 0 and the dish stays hidden until the manager sets it in the app (Menu tab, Set prices)
 const MOMOS = {
-  'Steam Momo': {
-    'Veg Steam Momo': 90,
-    'Paneer Steam Momo': 100,
-    'Corn Cheese Momo': 100,
-    'Paneer Cheese Momo': 100,
-    'Mushroom Cheese Momo': 110,
-    'Chicken Steam Momo': 110,
-    'Chicken Darjeeling Momo': 120,
-    'Chicken Cheese Momo': 120,
-  },
-  'Fried Momo': {
-    'Veg Fried Momo': 110,
-    'Paneer Fried Momo': 120,
-    'Chicken Fried Momo': 130,
-  },
-  'Pan-fried Momo': {
-    'Veg Pan-fried Momo': 130,
-    'Paneer Pan-fried Momo': 140,
-    'Chicken Pan-fried Momo': 150,
-    'Chicken Chili Garlic Momo': 160,
-  },
+  'Steam Momo': ['Veg Steam Momo', 'Paneer Steam Momo', 'Corn Cheese Momo', 'Paneer Cheese Momo', 'Mushroom Cheese Momo', 'Chicken Steam Momo', 'Chicken Darjeeling Momo', 'Chicken Cheese Momo'],
+  'Fried Momo': ['Veg Fried Momo', 'Paneer Fried Momo', 'Chicken Fried Momo'],
+  'Pan-fried Momo': ['Veg Pan-fried Momo', 'Paneer Pan-fried Momo', 'Chicken Pan-fried Momo', 'Chicken Chili Garlic Momo'],
 };
+
+const XPRESS = [
+  { name: 'Black Coffee', alt: [], small: 35, regular: 50 },
+  { name: 'Horlicks', alt: [], small: 40, regular: 60 },
+  { name: 'Cappuccino', alt: [], small: 35, regular: 50 },
+  { name: 'Masala Tea', alt: [], small: 40, regular: 50 },
+  { name: 'Lemon Tea', alt: [], small: 35, regular: 50 },
+  { name: 'Hazelnut Cappuccino', alt: [], small: 45, regular: 75 },
+  { name: 'Caramel Cappuccino', alt: [], small: 45, regular: 75 },
+  { name: 'Cardamom Tea', alt: ['Caradomom Tea', 'Elaichi Tea'], small: 40, regular: 50 },
+  { name: 'Ginger Tea', alt: [], small: 40, regular: 50 },
+  { name: 'Green Tea', alt: [], small: 40, regular: 50 },
+  { name: 'Jaggery Cappuccino', alt: [], small: 40, regular: 60 },
+];
 
 const normalize = (s) => String(s).toLowerCase().replace(/[^a-z]/g, '');
 
+async function applySizes(restaurantId, list, makeSizes, type, extra) {
+  const items = await MenuItem.find({ restaurantId });
+  let created = 0;
+  for (const d of list) {
+    const wanted = [d.name, ...(d.alt || [])].map(normalize);
+    const sizes = makeSizes(d);
+    const found = items.find((i) => wanted.includes(normalize(i.name)));
+    if (found) {
+      found.sizes = sizes;
+      found.price = Math.min(...sizes.map((s) => s.price));
+      found.type = type;
+      await found.save();
+    } else {
+      await MenuItem.create({
+        restaurantId, name: d.name, type, sizes, price: Math.min(...sizes.map((s) => s.price)),
+        quantity: 30, isAvailable: true, ...extra,
+      });
+      created++;
+    }
+  }
+  return created;
+}
+
 async function applyCatalog() {
   await Restaurant.updateMany({ name: /nescaf|xpress/i, allowSizes: { $ne: true } }, { $set: { allowSizes: true } });
-
   const meta = mongoose.connection.db.collection('meta');
-  if (await meta.findOne({ _id: 'catalog-v1' })) return;
 
   const nescafe = await Restaurant.findOne({ name: /nescaf/i }).select('_id');
-  if (!nescafe) return;
+  if (nescafe && !(await meta.findOne({ _id: 'catalog-nescafe-v1' }))) {
+    const made = await applySizes(
+      nescafe._id, NESCAFE_TEAS,
+      (t) => [{ name: 'Regular', price: t.regular }, { name: 'Large', price: t.large }],
+      'Hot Favourites', { prepTimeMins: 3, showTime: true }
+    );
 
-  const items = await MenuItem.find({ restaurantId: nescafe._id });
-  const find = (...names) => {
-    const wanted = names.map(normalize);
-    return items.find((i) => wanted.includes(normalize(i.name)));
-  };
-
-  for (const t of TEAS) {
-    const sizes = [{ name: 'Regular', price: t.regular }, { name: 'Large', price: t.large }];
-    const item = find(t.name, ...t.alt);
-    if (item) {
-      item.sizes = sizes;
-      item.price = t.regular;
-      item.type = 'Hot Favourites';
-      await item.save();
-    } else {
-      items.push(await MenuItem.create({
-        restaurantId: nescafe._id, name: t.name, type: 'Hot Favourites', price: t.regular, sizes,
-        quantity: 30, isAvailable: true, prepTimeMins: 3, showTime: true,
-      }));
-    }
-  }
-
-  let added = 0;
-  for (const [sub, dishes] of Object.entries(MOMOS)) {
-    for (const [dish, price] of Object.entries(dishes)) {
-      const existing = find(dish);
-      if (existing) {
-        existing.type = 'Momo';
-        existing.subType = sub;
-        await existing.save();
-        continue;
+    const items = await MenuItem.find({ restaurantId: nescafe._id });
+    let added = 0;
+    for (const [sub, dishes] of Object.entries(MOMOS)) {
+      for (const dish of dishes) {
+        const existing = items.find((i) => normalize(i.name) === normalize(dish));
+        if (existing) {
+          existing.type = 'Momo';
+          existing.subType = sub;
+          await existing.save();
+          continue;
+        }
+        await MenuItem.create({
+          restaurantId: nescafe._id, name: dish, type: 'Momo', subType: sub, price: 0,
+          quantity: 0, isAvailable: false, prepTimeMins: 8, showTime: true,
+        });
+        added++;
       }
-      await MenuItem.create({
-        restaurantId: nescafe._id, name: dish, type: 'Momo', subType: sub, price,
-        quantity: price > 0 ? 30 : 0, isAvailable: price > 0, prepTimeMins: 8, showTime: true,
-      });
-      added++;
     }
+    await meta.updateOne({ _id: 'catalog-nescafe-v1' }, { $set: { at: new Date() } }, { upsert: true });
+    console.log('Nescafe catalog: ' + NESCAFE_TEAS.length + ' teas with sizes (' + made + ' new), ' + added + ' momo dishes waiting for a price');
   }
 
-  await meta.updateOne({ _id: 'catalog-v1' }, { $set: { at: new Date() } }, { upsert: true });
-  console.log('Catalog applied: ' + TEAS.length + ' teas with sizes, ' + added + ' momo dishes added');
+  const xpress = await Restaurant.findOne({ name: /xpress/i }).select('_id');
+  if (xpress && !(await meta.findOne({ _id: 'catalog-xpress-v1' }))) {
+    const made = await applySizes(
+      xpress._id, XPRESS,
+      (d) => [{ name: 'Small', price: d.small }, { name: 'Regular', price: d.regular }],
+      'Hot Beverage', { prepTimeMins: 5, showTime: false }
+    );
+    await meta.updateOne({ _id: 'catalog-xpress-v1' }, { $set: { at: new Date() } }, { upsert: true });
+    console.log('Xpress catalog: ' + XPRESS.length + ' drinks with sizes (' + made + ' new)');
+  }
 }
 
 module.exports = { applyCatalog };
