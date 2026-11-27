@@ -10,7 +10,7 @@ const NESCAFE_TEAS = [
   { name: 'Masala Tea', alt: [], regular: 30, large: 50 },
 ];
 
-// Leave a price at 0 and the dish stays hidden until the manager sets it in the app (Menu tab, Set prices)
+// Momos start hidden (no price). The Nescafe manager prices them in the app (Menu tab, Set prices).
 const MOMOS = {
   'Steam Momo': ['Veg Steam Momo', 'Paneer Steam Momo', 'Corn Cheese Momo', 'Paneer Cheese Momo', 'Mushroom Cheese Momo', 'Chicken Steam Momo', 'Chicken Darjeeling Momo', 'Chicken Cheese Momo'],
   'Fried Momo': ['Veg Fried Momo', 'Paneer Fried Momo', 'Chicken Fried Momo'],
@@ -31,6 +31,7 @@ const XPRESS = [
   { name: 'Jaggery Cappuccino', alt: [], small: 40, regular: 60 },
 ];
 
+const STOCK = 30;
 const normalize = (s) => String(s).toLowerCase().replace(/[^a-z]/g, '');
 
 async function applySizes(restaurantId, list, makeSizes, type, extra) {
@@ -38,7 +39,7 @@ async function applySizes(restaurantId, list, makeSizes, type, extra) {
   let created = 0;
   for (const d of list) {
     const wanted = [d.name, ...(d.alt || [])].map(normalize);
-    const sizes = makeSizes(d);
+    const sizes = makeSizes(d).map((s) => ({ ...s, quantity: STOCK }));
     const found = items.find((i) => wanted.includes(normalize(i.name)));
     if (found) {
       found.sizes = sizes;
@@ -48,7 +49,7 @@ async function applySizes(restaurantId, list, makeSizes, type, extra) {
     } else {
       await MenuItem.create({
         restaurantId, name: d.name, type, sizes, price: Math.min(...sizes.map((s) => s.price)),
-        quantity: 30, isAvailable: true, ...extra,
+        quantity: 0, isAvailable: true, ...extra,
       });
       created++;
     }
@@ -57,7 +58,6 @@ async function applySizes(restaurantId, list, makeSizes, type, extra) {
 }
 
 async function applyCatalog() {
-  await Restaurant.updateMany({ name: /nescaf|xpress/i, allowSizes: { $ne: true } }, { $set: { allowSizes: true } });
   const meta = mongoose.connection.db.collection('meta');
 
   const nescafe = await Restaurant.findOne({ name: /nescaf/i }).select('_id');

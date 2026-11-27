@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const Order = require('../models/Order');
-const MenuItem = require('../models/MenuItem');
+const { restoreStock } = require('./stock');
 
 let client = null;
 
@@ -31,14 +31,6 @@ function validSignature(razorpayOrderId, paymentId, signature) {
   const a = Buffer.from(expected);
   const b = Buffer.from(signature);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-// Only menu dishes have stock. Print, binding and lamination lines are skipped.
-async function restoreStock(items) {
-  for (const it of items) {
-    if (!it.menuItemId) continue;
-    await MenuItem.updateOne({ _id: it.menuItemId }, { $inc: { quantity: it.quantity } });
-  }
 }
 
 // Ask Razorpay whether this order really received a payment of the right amount

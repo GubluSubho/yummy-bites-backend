@@ -1,8 +1,9 @@
 const mongoose = require('mongoose');
 
 const sizeSchema = new mongoose.Schema({
-  name: { type: String, required: true, trim: true, maxlength: 20 },
-  price: { type: Number, required: true, min: 1 }
+  name: { type: String, required: true, trim: true, maxlength: 24 },
+  price: { type: Number, required: true, min: 1 },
+  quantity: { type: Number, default: 0, min: 0 }
 }, { _id: false });
 
 const menuItemSchema = new mongoose.Schema({

@@ -65,11 +65,11 @@ function cleanConfig(input, current) {
   return { config: out };
 }
 
-// "1-5, 8, 10-12" -> number of distinct pages inside 1..total
-function parseRange(text, total) {
+// "1-5, 8, 10-12" -> sorted list of distinct pages, all inside 1..total
+function expandRange(text, total) {
   const set = new Set();
   const parts = String(text || '').split(',').map((s) => s.trim()).filter(Boolean);
-  if (parts.length === 0) return { error: 'Enter the pages to print, like 1-5, 8' };
+  if (parts.length === 0) return { error: 'Enter the pages, like 1-5, 8' };
   for (const p of parts) {
     const m = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(p);
     if (!m) return { error: 'Use pages like 1-5, 8, 10-12' };
@@ -78,7 +78,20 @@ function parseRange(text, total) {
     if (a < 1 || b < a || b > total) return { error: 'Pages must be between 1 and ' + total };
     for (let i = a; i <= b; i++) set.add(i);
   }
-  return { count: set.size, text: parts.join(', ') };
+  return { pages: [...set].sort((x, y) => x - y) };
+}
+
+// [1,2,3,7] -> "1-3, 7"
+function compress(pages) {
+  const out = [];
+  let i = 0;
+  while (i < pages.length) {
+    let j = i;
+    while (j + 1 < pages.length && pages[j + 1] === pages[j] + 1) j++;
+    out.push(j > i ? pages[i] + '-' + pages[j] : String(pages[i]));
+    i = j + 1;
+  }
+  return out.join(', ');
 }
 
 const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
@@ -98,29 +111,67 @@ async function quoteLine({ userId, config, service, job }) {
     const copies = toInt(j.copies);
     if (!copies || copies < 1 || copies > 50) return { error: 'Copies must be from 1 to 50' };
 
-    const color = j.color === 'color' ? 'color' : 'bw';
     const orientation = j.orientation === 'landscape' ? 'landscape' : 'portrait';
-    let pages = total;
+    const mode = j.color === 'color' || j.color === 'mixed' ? j.color : 'bw';
+
+    // Which pages are printed
+    let selected = [];
     let range = '';
-    const rangeText = String(j.range || '').trim().slice(0, 60);
+    const rangeText = String(j.range || '').trim().slice(0, 120);
     if (rangeText) {
-      const r = parseRange(rangeText, total);
+      const r = expandRange(rangeText, total);
       if (r.error) return { error: r.error };
-      pages = r.count;
-      range = r.text;
+      selected = r.pages;
+      range = compress(selected);
+    } else {
+      for (let i = 1; i <= total; i++) selected.push(i);
     }
 
-    const rate = color === 'color' ? config.colorPerPage : config.bwPerPage;
-    const price = Math.ceil(pages * rate * copies);
-    const detail =
-      plural(pages, 'page', 'pages') + ' | ' + (color === 'color' ? 'Colour' : 'B&W') + ' | ' +
-      plural(copies, 'copy', 'copies') + ' | ' + (orientation === 'landscape' ? 'Landscape' : 'Portrait') +
-      (range ? ' | pages ' + range : '');
+    // Which of them are colour
+    let colorPages = [];
+    if (mode === 'color') {
+      colorPages = selected;
+    } else if (mode === 'mixed') {
+      const r = expandRange(String(j.colorPages || '').slice(0, 200), total);
+      if (r.error) return { error: 'Pick the colour pages. ' + r.error };
+      const inSelection = new Set(selected);
+      colorPages = r.pages.filter((p) => inSelection.has(p));
+      if (colorPages.length === 0) return { error: 'Pick at least one colour page, or choose Black & White' };
+    }
+
+    const colorCount = colorPages.length;
+    const bwCount = selected.length - colorCount;
+    const price = Math.ceil((bwCount * config.bwPerPage + colorCount * config.colorPerPage) * copies);
+
+    const colourLabel =
+      colorCount === 0 ? 'B&W' : bwCount === 0 ? 'Colour' : 'Colour pages ' + compress(colorPages) + ', rest B&W';
+    const detail = [
+      plural(selected.length, 'page', 'pages'),
+      colourLabel,
+      plural(copies, 'copy', 'copies'),
+      orientation === 'landscape' ? 'Landscape' : 'Portrait',
+      range ? 'pages ' + range : '',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+
     return {
       price,
       title: 'Print: ' + short(file.name, 28),
       detail,
-      job: { fileId: String(file._id), fileName: file.name, totalPages: total, range, pages, copies, color, orientation },
+      job: {
+        fileId: String(file._id),
+        fileName: file.name,
+        totalPages: total,
+        range,
+        pages: selected.length,
+        copies,
+        color: colorCount === 0 ? 'bw' : bwCount === 0 ? 'color' : 'mixed',
+        colorPages: compress(colorPages),
+        colorCount,
+        bwCount,
+        orientation,
+      },
     };
   }
 
@@ -151,4 +202,4 @@ async function quoteLine({ userId, config, service, job }) {
   return { error: 'Unknown service' };
 }
 
-module.exports = { DEFAULTS, getConfig, cleanConfig, parseRange, quoteLine };
+module.exports = { DEFAULTS, getConfig, cleanConfig, expandRange, compress, quoteLine };

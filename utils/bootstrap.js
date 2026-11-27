@@ -113,6 +113,25 @@ async function applyItemTiming() {
   );
 }
 
+// Every cart can use sizes, and every size has its own stock. Older sized dishes get the dish's stock per size.
+async function applySizeStock() {
+  await Restaurant.updateMany({ allowSizes: { $ne: true } }, { $set: { allowSizes: true } });
+
+  const old = await MenuItem.collection
+    .find({ 'sizes.0': { $exists: true }, sizes: { $elemMatch: { quantity: { $exists: false } } } })
+    .toArray();
+  for (const doc of old) {
+    const base = doc.quantity > 0 ? doc.quantity : 30;
+    const sizes = doc.sizes.map((s) => ({
+      name: s.name,
+      price: s.price,
+      quantity: typeof s.quantity === 'number' ? s.quantity : base,
+    }));
+    await MenuItem.collection.updateOne({ _id: doc._id }, { $set: { sizes } });
+  }
+  if (old.length > 0) console.log('Per-size stock set up for ' + old.length + ' dishes');
+}
+
 async function bootstrap() {
   const carts = await Restaurant.countDocuments();
   const managers = await User.countDocuments({ role: 'manager' });
@@ -123,6 +142,7 @@ async function bootstrap() {
   await applyCartRules();
   await applyItemTiming();
   await require('./catalog').applyCatalog();
+  await applySizeStock();
   await maybeResetPasswords();
 }
 

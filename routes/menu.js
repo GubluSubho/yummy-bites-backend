@@ -3,26 +3,30 @@ const mongoose = require('mongoose');
 const router = express.Router();
 const MenuItem = require('../models/MenuItem');
 const ItemImage = require('../models/ItemImage');
-const Restaurant = require('../models/Restaurant');
 const { verifyToken, requireRole } = require('../middleware/auth');
+const { hasSizes, totalStock } = require('../utils/stock');
 
-// Check a list of sizes. An empty list means "no sizes".
+// Check a list of sizes (name, price and its own stock). An empty list means "no sizes".
 function cleanSizes(input) {
   if (!Array.isArray(input)) return { error: 'Sizes must be a list' };
   if (input.length === 0) return { sizes: [] };
-  if (input.length > 5) return { error: 'An item can have at most 5 sizes' };
+  if (input.length > 6) return { error: 'A dish can have at most 6 sizes' };
   const seen = new Set();
   const out = [];
   for (const s of input) {
     const name = String((s && s.name) || '').trim();
     const price = Number(s && s.price);
-    if (!name || name.length > 20) return { error: 'Each size needs a name (max 20 characters)' };
+    const quantity = Number(s && s.quantity);
+    if (!name || name.length > 24) return { error: 'Each size needs a name (max 24 characters)' };
     if (!Number.isFinite(price) || price < 1 || price > 5000) return { error: 'Enter a valid price for ' + name };
+    if (!Number.isInteger(quantity) || quantity < 0 || quantity > 1000) {
+      return { error: 'Stock for ' + name + ' must be a whole number from 0 to 1000' };
+    }
     if (seen.has(name.toLowerCase())) return { error: 'Size names must be different' };
     seen.add(name.toLowerCase());
-    out.push({ name, price });
+    out.push({ name, price, quantity });
   }
-  if (out.length < 2) return { error: 'Add at least two sizes, or remove sizes to use one price' };
+  if (out.length < 2) return { error: 'Add at least two sizes, or turn sizes off to use one price' };
   return { sizes: out };
 }
 
@@ -43,12 +47,19 @@ async function findOwnItem(req, res) {
   return item;
 }
 
-// A dish that had no price goes on sale (with stock) the moment it gets one
+// A dish that had no price goes on sale the moment it gets one
 function publishIfNew(item, wasUnpriced) {
   if (wasUnpriced && item.price > 0) {
-    if (item.quantity <= 0) item.quantity = 30;
+    if (!hasSizes(item) && item.quantity <= 0) item.quantity = 30;
     item.isAvailable = true;
   }
+}
+
+// What customers get: for sized dishes, `quantity` is the total across sizes
+function forCustomers(doc) {
+  const o = doc.toObject();
+  if (hasSizes(o)) o.quantity = totalStock(o);
+  return o;
 }
 
 // Manager: every dish of their own cart, including ones that still need a price
@@ -67,7 +78,7 @@ router.get('/:restaurantId', async (req, res) => {
       return res.status(400).json({ error: 'Invalid restaurant' });
     }
     const items = await MenuItem.find({ restaurantId: req.params.restaurantId, price: { $gt: 0 } });
-    res.json(items);
+    res.json(items.map(forCustomers));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -138,7 +149,7 @@ router.delete('/:itemId/image', verifyToken, requireRole('manager'), async (req,
   }
 });
 
-// Manager: add an item to their own cart only
+// Manager: add an item to their own cart only (with sizes, if the dish comes in sizes)
 router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const { name, type, subType, sizes, price, quantity, prepTimeMins, showTime } = req.body;
@@ -150,18 +161,17 @@ router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
 
     let sizeList = [];
     if (Array.isArray(sizes) && sizes.length > 0) {
-      const cart = await Restaurant.findById(req.user.restaurantId).select('allowSizes');
-      if (!cart || !cart.allowSizes) return res.status(400).json({ error: 'Sizes are not available for this cart' });
       const parsed = cleanSizes(sizes);
       if (parsed.error) return res.status(400).json({ error: parsed.error });
       sizeList = parsed.sizes;
     }
+    const sized = sizeList.length > 0;
 
-    const cleanPrice = sizeList.length > 0 ? Math.min(...sizeList.map((s) => s.price)) : Number(price);
+    const cleanPrice = sized ? Math.min(...sizeList.map((s) => s.price)) : Number(price);
     if (!Number.isFinite(cleanPrice) || cleanPrice < 0 || cleanPrice > 5000) {
       return res.status(400).json({ error: 'Enter a valid price' });
     }
-    const cleanQty = quantity === undefined ? 0 : Number(quantity);
+    const cleanQty = sized ? 0 : quantity === undefined ? 0 : Number(quantity);
     if (!Number.isInteger(cleanQty) || cleanQty < 0 || cleanQty > 1000) {
       return res.status(400).json({ error: 'Stock must be a whole number from 0 to 1000' });
     }
@@ -180,7 +190,7 @@ router.post('/add', verifyToken, requireRole('manager'), async (req, res) => {
       quantity: cleanQty,
       prepTimeMins: cleanPrep,
       showTime: showTime === true,
-      isAvailable: cleanQty > 0,
+      isAvailable: sized ? true : cleanQty > 0,
     });
     res.status(201).json(item);
   } catch (err) {
@@ -197,8 +207,8 @@ router.patch('/:itemId/availability', verifyToken, requireRole('manager'), async
     if (typeof req.body.isAvailable !== 'boolean') {
       return res.status(400).json({ error: 'isAvailable must be true or false' });
     }
-    if (req.body.isAvailable && item.quantity <= 0) {
-      return res.status(400).json({ error: 'Set the stock above 0 before turning this item on' });
+    if (req.body.isAvailable && totalStock(item) <= 0) {
+      return res.status(400).json({ error: 'Set some stock before turning this item on' });
     }
 
     item.isAvailable = req.body.isAvailable;
@@ -209,11 +219,14 @@ router.patch('/:itemId/availability', verifyToken, requireRole('manager'), async
   }
 });
 
-// Manager: set stock. Zero turns the item off, restocking from zero turns it back on.
+// Manager: set stock of a dish without sizes. Zero turns it off, restocking from zero turns it back on.
 router.patch('/:itemId/quantity', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const item = await findOwnItem(req, res);
     if (!item) return;
+    if (hasSizes(item)) {
+      return res.status(400).json({ error: 'This dish has sizes. Set the stock of each size instead.' });
+    }
 
     const qty = Number(req.body.quantity);
     if (!Number.isInteger(qty) || qty < 0 || qty > 1000) {
@@ -231,15 +244,15 @@ router.patch('/:itemId/quantity', verifyToken, requireRole('manager'), async (re
   }
 });
 
-// Manager: change the price
+// Manager: change the price of a dish without sizes
 router.patch('/:itemId/price', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const item = await findOwnItem(req, res);
     if (!item) return;
-
-    if ((item.sizes || []).length > 0) {
-      return res.status(400).json({ error: 'This item has sizes. Change the prices in the sizes list.' });
+    if (hasSizes(item)) {
+      return res.status(400).json({ error: 'This dish has sizes. Change the prices in the sizes list.' });
     }
+
     const price = Number(req.body.price);
     if (!Number.isFinite(price) || price < 0 || price > 5000) {
       return res.status(400).json({ error: 'Enter a valid price' });
@@ -280,20 +293,24 @@ router.patch('/:itemId/timing', verifyToken, requireRole('manager'), async (req,
   }
 });
 
-// Manager: set the sizes of a dish (an empty list removes them)
+// Manager: set the sizes of a dish, each with its own price and stock (an empty list removes the sizes)
 router.patch('/:itemId/sizes', verifyToken, requireRole('manager'), async (req, res) => {
   try {
     const item = await findOwnItem(req, res);
     if (!item) return;
-    const cart = await Restaurant.findById(req.user.restaurantId).select('allowSizes');
-    if (!cart || !cart.allowSizes) return res.status(400).json({ error: 'Sizes are not available for this cart' });
 
     const parsed = cleanSizes(req.body.sizes);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
 
     const wasUnpriced = !(item.price > 0);
-    item.sizes = parsed.sizes;
-    if (parsed.sizes.length > 0) item.price = Math.min(...parsed.sizes.map((s) => s.price));
+    if (parsed.sizes.length > 0) {
+      item.sizes = parsed.sizes;
+      item.price = Math.min(...parsed.sizes.map((s) => s.price));
+    } else {
+      // Going back to one price: keep the stock that was there
+      item.quantity = totalStock(item);
+      item.sizes = [];
+    }
     publishIfNew(item, wasUnpriced);
     await item.save();
     res.json(item);

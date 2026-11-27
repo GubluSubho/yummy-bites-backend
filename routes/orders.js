@@ -11,6 +11,7 @@ const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
 const { refundUpi, settleOrCancel } = require('../utils/payments');
 const { notifyOrder } = require('../utils/push');
 const { getConfig, quoteLine } = require('../utils/printPricing');
+const { hasSizes, restoreStock } = require('../utils/stock');
 
 const ID_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 // Cash is not accepted: online payment or the wallet only
@@ -69,21 +70,21 @@ async function withNames(input) {
   return Array.isArray(input) ? out : out[0];
 }
 
-// Only menu dishes have stock. Print, binding and lamination lines are skipped.
-async function restoreStock(items) {
-  for (const it of items) {
-    if (!it.menuItemId) continue;
-    await MenuItem.updateOne({ _id: it.menuItemId }, { $inc: { quantity: it.quantity } });
-  }
-}
-
-// Explain to the customer why an item could not be reserved
-async function soldOutMessage(menuItemId, restaurantId, wantedQty) {
-  const doc = await MenuItem.findOne({ _id: menuItemId, restaurantId }).select('name quantity isAvailable');
+// Explain to the customer why a dish (or one of its sizes) could not be reserved
+async function soldOutMessage(menuItemId, restaurantId, wantedQty, size) {
+  const doc = await MenuItem.findOne({ _id: menuItemId, restaurantId }).select('name quantity isAvailable sizes');
   if (!doc) return 'An item is no longer on the menu';
   if (!doc.isAvailable) return doc.name + ' is not being served right now';
-  if (doc.quantity <= 0) return doc.name + ' has just sold out';
-  return 'Only ' + doc.quantity + ' left of ' + doc.name + ' (you asked for ' + wantedQty + ')';
+
+  let have = doc.quantity;
+  let label = doc.name;
+  if (size) {
+    const s = (doc.sizes || []).find((z) => z.name === size);
+    have = s ? s.quantity || 0 : 0;
+    label += ' (' + size + ')';
+  }
+  if (have <= 0) return label + ' has just sold out';
+  return 'Only ' + have + ' left of ' + label + ' (you asked for ' + wantedQty + ')';
 }
 
 // Give wallet money back for a cancelled order. Safe to call twice: only the first call pays out.
@@ -139,8 +140,7 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
     }
     const method = paymentMethod;
 
-    // Dishes (by size) and print / binding / lamination lines
-    const wanted = new Map();
+    // Dishes (one line per dish and size) and print / binding / lamination lines
     const lines = new Map();
     const services = [];
     for (const line of items) {
@@ -153,10 +153,8 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       if (!line || !mongoose.isValidObjectId(line.menuItemId) || !Number.isInteger(qty) || qty < 1 || qty > 20) {
         return res.status(400).json({ error: 'Invalid item or quantity' });
       }
-      const key = String(line.menuItemId);
-      const size = String(line.size || '').trim().slice(0, 30);
-      lines.set(key + '|' + size, (lines.get(key + '|' + size) || 0) + qty);
-      wanted.set(key, (wanted.get(key) || 0) + qty);
+      const key = String(line.menuItemId) + '|' + String(line.size || '').trim().slice(0, 30);
+      lines.set(key, (lines.get(key) || 0) + qty);
     }
     if (services.length > 10) return res.status(400).json({ error: 'Too many print jobs in one order' });
 
@@ -220,53 +218,61 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       }
     }
 
-    // Reserve stock. Each dish is taken in one atomic step, so two customers can never get the same last unit.
-    const docs = new Map();
-    for (const [menuItemId, qty] of wanted) {
-      const item = await MenuItem.findOneAndUpdate(
-        { _id: menuItemId, restaurantId, isAvailable: true, price: { $gt: 0 }, quantity: { $gte: qty } },
-        { $inc: { quantity: -qty } },
-        { new: true }
-      );
+    const ids = [...new Set([...lines.keys()].map((k) => k.slice(0, k.indexOf('|'))))];
+    const loaded = await MenuItem.find({ _id: { $in: ids }, restaurantId });
+    const byId = new Map(loaded.map((d) => [String(d._id), d]));
 
-      if (!item) {
-        await restoreStock(reserved);
-        reserved.length = 0;
-        return res.status(400).json({ error: await soldOutMessage(menuItemId, restaurantId, qty) });
-      }
-      reserved.push({ menuItemId: item._id, quantity: qty });
-      docs.set(menuItemId, item);
-    }
-
-    // One order line per dish and size, priced from the size chosen
+    // Reserve stock. Each line is taken in one atomic step on its own stock (the dish, or one size),
+    // so two customers can never get the same last unit.
     const orderItems = [];
     for (const [key, qty] of lines) {
       const cut = key.indexOf('|');
-      const item = docs.get(key.slice(0, cut));
+      const id = key.slice(0, cut);
       const size = key.slice(cut + 1);
-      const sizes = item.sizes || [];
-      let price = item.price;
-      if (sizes.length > 0) {
-        const chosen = sizes.find((s) => s.name === size);
-        if (!chosen) {
-          await restoreStock(reserved);
-          reserved.length = 0;
-          return res.status(400).json({ error: 'Choose a size for ' + item.name });
-        }
-        price = chosen.price;
-      } else if (size) {
+      const doc = byId.get(id);
+
+      const fail = async (message) => {
         await restoreStock(reserved);
         reserved.length = 0;
-        return res.status(400).json({ error: item.name + ' does not come in sizes' });
-      }
+        return res.status(400).json({ error: message });
+      };
+
+      if (!doc || !(doc.price > 0)) return fail('An item is no longer on the menu');
+      const sized = hasSizes(doc);
+      if (sized && !size) return fail('Choose a size for ' + doc.name);
+      if (!sized && size) return fail(doc.name + ' does not come in sizes');
+      if (sized && !doc.sizes.some((s) => s.name === size)) return fail('Choose a size for ' + doc.name);
+
+      const updated = sized
+        ? await MenuItem.findOneAndUpdate(
+            {
+              _id: id,
+              restaurantId,
+              isAvailable: true,
+              price: { $gt: 0 },
+              sizes: { $elemMatch: { name: size, quantity: { $gte: qty } } },
+            },
+            { $inc: { 'sizes.$.quantity': -qty } },
+            { new: true }
+          )
+        : await MenuItem.findOneAndUpdate(
+            { _id: id, restaurantId, isAvailable: true, price: { $gt: 0 }, quantity: { $gte: qty } },
+            { $inc: { quantity: -qty } },
+            { new: true }
+          );
+
+      if (!updated) return fail(await soldOutMessage(id, restaurantId, qty, size));
+
+      reserved.push({ menuItemId: updated._id, size: size || undefined, quantity: qty });
+      const price = sized ? updated.sizes.find((s) => s.name === size).price : updated.price;
       orderItems.push({
-        menuItemId: item._id,
-        name: item.name,
+        menuItemId: updated._id,
+        name: updated.name,
         size: size || undefined,
         price,
         quantity: qty,
-        prepTimeMins: item.showTime ? item.prepTimeMins || 5 : 0,
-        imageVersion: item.hasImage ? item.imageRev || 0 : 0,
+        prepTimeMins: updated.showTime ? updated.prepTimeMins || 5 : 0,
+        imageVersion: updated.hasImage ? updated.imageRev || 0 : 0,
       });
     }
     const allItems = [...orderItems, ...serviceItems];

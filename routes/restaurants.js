@@ -34,11 +34,11 @@ router.get('/mine', verifyToken, requireRole('manager'), async (req, res) => {
       _id: r._id,
       name: r.name,
       cooksOnDuty: r.cooksOnDuty,
-      allowSizes: !!r.allowSizes,
       liveCounter: !!r.liveCounter,
       isOpen: r.isOpen !== false,
       hasImage: !!r.hasImage,
       imageRev: r.imageRev || 0,
+      allowSizes: true,
     });
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -145,12 +145,21 @@ router.get('/', async (req, res) => {
       .select('name location liveCounter allowParcel isOpen hasImage imageRev')
       .lean();
 
+    // A dish counts as available when it is on, priced, and has stock (in any of its sizes)
+    const stockOf = {
+      $cond: [
+        { $gt: [{ $size: { $ifNull: ['$sizes', []] } }, 0] },
+        { $sum: '$sizes.quantity' },
+        '$quantity',
+      ],
+    };
     const counts = await MenuItem.aggregate([
+      { $match: { price: { $gt: 0 } } },
       {
         $group: {
           _id: '$restaurantId',
           totalItems: { $sum: 1 },
-          availableItems: { $sum: { $cond: [{ $and: ['$isAvailable', { $gt: ['$quantity', 0] }] }, 1, 0] } },
+          availableItems: { $sum: { $cond: [{ $and: ['$isAvailable', { $gt: [stockOf, 0] }] }, 1, 0] } },
         },
       },
     ]);

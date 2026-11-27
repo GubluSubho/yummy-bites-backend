@@ -6,6 +6,7 @@ const Restaurant = require('../models/Restaurant');
 const { verifyToken, requireRole } = require('../middleware/auth');
 const { PARCEL_FEE, activeQueue, estimateFor } = require('../utils/rules');
 const { getConfig, quoteLine } = require('../utils/printPricing');
+const { hasSizes } = require('../utils/stock');
 
 const SERVICES = ['print', 'binding', 'lamination'];
 
@@ -20,7 +21,6 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
     }
 
     const lines = new Map();
-    const wanted = new Map();
     const services = [];
     for (const line of items) {
       if (line && line.service) {
@@ -32,49 +32,46 @@ router.post('/', verifyToken, requireRole('customer'), async (req, res) => {
       if (!line || !mongoose.isValidObjectId(line.menuItemId) || !Number.isInteger(qty) || qty < 1 || qty > 20) {
         return res.status(400).json({ error: 'Invalid item or quantity' });
       }
-      const id = String(line.menuItemId);
-      const size = String(line.size || '').trim().slice(0, 30);
-      lines.set(id + '|' + size, (lines.get(id + '|' + size) || 0) + qty);
-      wanted.set(id, (wanted.get(id) || 0) + qty);
+      const key = String(line.menuItemId) + '|' + String(line.size || '').trim().slice(0, 30);
+      lines.set(key, (lines.get(key) || 0) + qty);
     }
 
     const restaurant = await Restaurant.findById(restaurantId);
     if (!restaurant) return res.status(404).json({ error: 'Restaurant not found' });
 
-    const docs = await MenuItem.find({ _id: { $in: [...wanted.keys()] }, restaurantId });
+    const ids = [...new Set([...lines.keys()].map((k) => k.slice(0, k.indexOf('|'))))];
+    const docs = await MenuItem.find({ _id: { $in: ids }, restaurantId });
     const byId = new Map(docs.map((d) => [String(d._id), d]));
 
     const problems = [];
     const orderItems = [];
     let subtotal = 0;
 
-    for (const [id, qty] of wanted) {
-      const d = byId.get(id);
-      if (!d || d.price <= 0) problems.push('An item is no longer on the menu');
-      else if (!d.isAvailable || d.quantity <= 0) {
-        problems.push(d.name + (d.quantity <= 0 ? ' has sold out' : ' is not being served right now'));
-      } else if (d.quantity < qty) problems.push('Only ' + d.quantity + ' left of ' + d.name);
-    }
-
     for (const [key, qty] of lines) {
       const cut = key.indexOf('|');
       const d = byId.get(key.slice(0, cut));
       const size = key.slice(cut + 1);
-      if (!d || d.price <= 0 || !d.isAvailable || d.quantity < wanted.get(String(d._id))) continue;
 
-      const sizes = d.sizes || [];
+      if (!d || d.price <= 0) { problems.push('An item is no longer on the menu'); continue; }
+      if (!d.isAvailable) { problems.push(d.name + ' is not being served right now'); continue; }
+
+      const sized = hasSizes(d);
       let price = d.price;
-      if (sizes.length > 0) {
-        const chosen = sizes.find((s) => s.name === size);
-        if (!chosen) {
-          problems.push('Choose a size for ' + d.name);
-          continue;
-        }
+      let have = d.quantity;
+      if (sized) {
+        const chosen = d.sizes.find((s) => s.name === size);
+        if (!chosen) { problems.push('Choose a size for ' + d.name); continue; }
         price = chosen.price;
+        have = chosen.quantity || 0;
       } else if (size) {
         problems.push(d.name + ' does not come in sizes');
         continue;
       }
+
+      const label = d.name + (sized ? ' (' + size + ')' : '');
+      if (have <= 0) { problems.push(label + ' has sold out'); continue; }
+      if (have < qty) { problems.push('Only ' + have + ' left of ' + label); continue; }
+
       orderItems.push({ prepTimeMins: d.showTime ? d.prepTimeMins || 5 : 0, quantity: qty });
       subtotal += price * qty;
     }
