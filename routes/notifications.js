@@ -42,6 +42,7 @@ router.get('/popups', customerOnly, async (req, res) => {
       popups.push({
         id: String(claimed._id),
         type: claimed.type,
+        kind: claimed.kind || 'food',
         orderId: claimed.orderId,
         place: claimed.place,
         note: claimed.note,

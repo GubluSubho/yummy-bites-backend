@@ -7,13 +7,11 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
-// Large enough for a compressed dish photo
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static('public'));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Slow down password guessing on manager logins
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 30,
@@ -23,7 +21,10 @@ const loginLimiter = rateLimit({
 });
 app.use('/api/auth/login', loginLimiter);
 
+app.use('/api/auth/phone', require('./routes/phoneAuth'));
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/account', require('./routes/account'));
+app.use('/api/admin', require('./routes/admin'));
 app.use('/api/menu', require('./routes/menu'));
 app.use('/api/restaurants', require('./routes/restaurants'));
 app.use('/api/orders', require('./routes/orders'));
@@ -33,6 +34,7 @@ app.use('/api/payment', require('./routes/payment'));
 app.use('/api/push', require('./routes/push'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/print', require('./routes/print'));
+app.use('/api/print', require('./routes/printPreview'));
 
 process.on('unhandledRejection', (err) => console.log('Unhandled error:', err && err.message ? err.message : err));
 
@@ -41,6 +43,7 @@ mongoose.connect(process.env.MONGO_URI)
     console.log('MongoDB connected');
     try {
       await require('./utils/bootstrap').bootstrap();
+      await require('./utils/admin').ensureAdmin();
     } catch (e) {
       console.log('Bootstrap problem:', e.message);
     }

@@ -39,7 +39,6 @@ async function getConfig(restaurantId) {
   return shape(doc || DEFAULTS);
 }
 
-// Check prices a manager typed in. Binding types stay fixed, only their prices change.
 function cleanConfig(input, current) {
   const out = {};
   for (const k of ['bwPerPage', 'colorPerPage', 'laminationPerPage']) {
@@ -55,17 +54,11 @@ function cleanConfig(input, current) {
     const perPage = Number(g.perPage);
     if (!Number.isFinite(base) || base < 0 || base > 2000) return { error: 'Check the starting price for ' + cur.label };
     if (!Number.isFinite(perPage) || perPage < 0 || perPage > 50) return { error: 'Check the per-page price for ' + cur.label };
-    out.binding.push({
-      key: cur.key,
-      label: cur.label,
-      base: Math.round(base * 100) / 100,
-      perPage: Math.round(perPage * 100) / 100,
-    });
+    out.binding.push({ key: cur.key, label: cur.label, base: Math.round(base * 100) / 100, perPage: Math.round(perPage * 100) / 100 });
   }
   return { config: out };
 }
 
-// "1-5, 8, 10-12" -> sorted list of distinct pages, all inside 1..total
 function expandRange(text, total) {
   const set = new Set();
   const parts = String(text || '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -81,7 +74,6 @@ function expandRange(text, total) {
   return { pages: [...set].sort((x, y) => x - y) };
 }
 
-// [1,2,3,7] -> "1-3, 7"
 function compress(pages) {
   const out = [];
   let i = 0;
@@ -114,7 +106,6 @@ async function quoteLine({ userId, config, service, job }) {
     const orientation = j.orientation === 'landscape' ? 'landscape' : 'portrait';
     const mode = j.color === 'color' || j.color === 'mixed' ? j.color : 'bw';
 
-    // Which pages are printed
     let selected = [];
     let range = '';
     const rangeText = String(j.range || '').trim().slice(0, 120);
@@ -127,7 +118,6 @@ async function quoteLine({ userId, config, service, job }) {
       for (let i = 1; i <= total; i++) selected.push(i);
     }
 
-    // Which of them are colour
     let colorPages = [];
     if (mode === 'color') {
       colorPages = selected;
@@ -141,36 +131,46 @@ async function quoteLine({ userId, config, service, job }) {
 
     const colorCount = colorPages.length;
     const bwCount = selected.length - colorCount;
-    const price = Math.ceil((bwCount * config.bwPerPage + colorCount * config.colorPerPage) * copies);
+    let price = Math.ceil((bwCount * config.bwPerPage + colorCount * config.colorPerPage) * copies);
 
-    const colourLabel =
-      colorCount === 0 ? 'B&W' : bwCount === 0 ? 'Colour' : 'Colour pages ' + compress(colorPages) + ', rest B&W';
+    // Optional finishing on the same job: binding (one per copy) and lamination (per page, per copy)
+    const finish = j.finish || {};
+    const extras = [];
+    let bindKey = '';
+    let lamPages = 0;
+    if (finish.binding) {
+      const type = (config.binding || []).find((b) => b.key === finish.binding);
+      if (!type) return { error: 'Choose a binding type' };
+      price += Math.ceil(type.base + type.perPage * selected.length) * copies;
+      extras.push(type.label);
+      bindKey = type.key;
+    }
+    if (finish.lamination) {
+      lamPages = toInt(finish.laminationPages) || selected.length;
+      if (lamPages < 1 || lamPages > selected.length) return { error: 'Lamination pages must be from 1 to ' + selected.length };
+      price += lamPages * config.laminationPerPage * copies;
+      extras.push('Lamination (' + plural(lamPages, 'page', 'pages') + ')');
+    }
+
+    const colourLabel = colorCount === 0 ? 'B&W' : bwCount === 0 ? 'Colour' : 'Colour pages ' + compress(colorPages) + ', rest B&W';
     const detail = [
       plural(selected.length, 'page', 'pages'),
       colourLabel,
       plural(copies, 'copy', 'copies'),
       orientation === 'landscape' ? 'Landscape' : 'Portrait',
       range ? 'pages ' + range : '',
-    ]
-      .filter(Boolean)
-      .join(' | ');
+      ...extras.map((e) => '+ ' + e),
+    ].filter(Boolean).join(' | ');
 
     return {
       price,
       title: 'Print: ' + short(file.name, 28),
       detail,
       job: {
-        fileId: String(file._id),
-        fileName: file.name,
-        totalPages: total,
-        range,
-        pages: selected.length,
-        copies,
+        fileId: String(file._id), fileName: file.name, totalPages: total, range, pages: selected.length, copies,
         color: colorCount === 0 ? 'bw' : bwCount === 0 ? 'color' : 'mixed',
-        colorPages: compress(colorPages),
-        colorCount,
-        bwCount,
-        orientation,
+        colorPages: compress(colorPages), colorCount, bwCount, orientation,
+        finish: { binding: bindKey, lamination: !!lamPages, laminationPages: lamPages },
       },
     };
   }
@@ -180,23 +180,13 @@ async function quoteLine({ userId, config, service, job }) {
     if (!type) return { error: 'Choose a binding type' };
     const pages = toInt(j.pages);
     if (!pages || pages < 1 || pages > 500) return { error: 'Enter the number of pages (1 to 500)' };
-    return {
-      price: Math.ceil(type.base + type.perPage * pages),
-      title: 'Binding: ' + type.label,
-      detail: plural(pages, 'page', 'pages'),
-      job: { type: type.key, pages },
-    };
+    return { price: Math.ceil(type.base + type.perPage * pages), title: 'Binding: ' + type.label, detail: plural(pages, 'page', 'pages'), job: { type: type.key, pages } };
   }
 
   if (service === 'lamination') {
     const pages = toInt(j.pages);
     if (!pages || pages < 1 || pages > 200) return { error: 'Enter the number of pages (1 to 200)' };
-    return {
-      price: pages * config.laminationPerPage,
-      title: 'Lamination',
-      detail: plural(pages, 'page', 'pages'),
-      job: { pages },
-    };
+    return { price: pages * config.laminationPerPage, title: 'Lamination', detail: plural(pages, 'page', 'pages'), job: { pages } };
   }
 
   return { error: 'Unknown service' };
